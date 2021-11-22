@@ -55,6 +55,8 @@
 #include <libias/set.h>
 #include <libias/str.h>
 
+#include "mkdirs.h"
+
 #define MAX_PARALLEL 3 /* number of simultaneous transfers */
 
 enum FetchDistfileNextReason {
@@ -305,6 +307,13 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 	if (queue_entry) {
 		if (queue_entry->distfile->fh) {
 			fclose(queue_entry->distfile->fh);
+		}
+		{
+			SCOPE_MEMPOOL(pool);
+			char *dir = dirname(str_dup(pool, queue_entry->filename));
+			unless (mkdirs(dir)) {
+				err(1, "mkdir: %s", dir);
+			}
 		}
 		queue_entry->distfile->fh = fopen(queue_entry->filename, "wb");
 		unless (queue_entry->distfile->fh) {

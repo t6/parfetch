@@ -33,6 +33,7 @@ bundle libias.a
 bundle libparfetch.a
 	CFLAGS += `pkg-config --cflags libcurl libevent`
 	parfetch.c
+	mkdirs.c
 
 bin parfetch
 	LDADD += -static -Wl,--push-state -Wl,--static `pkg-config --static --libs libcurl libevent` -Wl,--pop-state
