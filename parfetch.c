@@ -65,12 +65,6 @@ enum FetchDistfileNextReason {
 	FETCH_DISTFILE_NEXT_SIZE_MISMATCH,
 };
 
-enum ParfetchMode {
-	PARFETCH_FETCH,
-	PARFETCH_FETCH_LIST,
-	PARFETCH_FETCH_URL_LIST_INT,
-};
-
 enum SitesType {
 	MASTER_SITES,
 	PATCH_SITES,
@@ -116,8 +110,7 @@ struct CurlData {
 static const char *makevar(const char *);
 static struct Distfile *parse_distfile_arg(struct Mempool *, struct Map *, enum SitesType, const char *);
 static struct Map *load_distinfo(struct Mempool *);
-static void create_distsubdirs(struct Mempool *, enum ParfetchMode, struct Array *);
-static void queue_distfiles(struct Mempool *, enum ParfetchMode, struct Array *);
+static void prepare_distfile_queues(struct Mempool *, struct Array *);
 static void fetch_distfile(CURLM *, struct Queue *);
 static void fetch_distfile_next_mirror(struct DistfileQueueEntry *, CURLM *, enum FetchDistfileNextReason, const char *);
 static size_t fetch_distfile_write_cb(char *, size_t, size_t, void *);
@@ -237,34 +230,8 @@ load_distinfo(struct Mempool *extpool)
 	return distinfo;
 }
 
-
 void
-create_distsubdirs(struct Mempool *pool, enum ParfetchMode mode, struct Array *distfiles)
-{
-	// Create subdirs once under dp_DISTDIR
-	struct Set *distdirs = mempool_set(pool, str_compare, NULL);
-	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
-		SCOPE_MEMPOOL(_pool);
-		if (strstr(distfile->name, "/")) {
-			char *path = mempool_take(pool, dirname(str_dup(_pool, distfile->name)));
-			set_add(distdirs, path);
-		}
-	}
-
-	switch (mode) {
-		case PARFETCH_FETCH:
-			break;
-		case PARFETCH_FETCH_LIST:
-		case PARFETCH_FETCH_URL_LIST_INT:
-			SET_FOREACH(distdirs, const char *, dir) {
-				fprintf(stdout, "mkdir -p \"%s\"\n", dir);
-			}
-			break;
-	}
-}
-
-void
-queue_distfiles(struct Mempool *pool, enum ParfetchMode mode, struct Array *distfiles)
+prepare_distfile_queues(struct Mempool *pool, struct Array *distfiles)
 {
 	// collect MASTER_SITES / PATCH_SITES per group and create mirror queues
 	struct Map *groupsites[2];
@@ -294,15 +261,6 @@ queue_distfiles(struct Mempool *pool, enum ParfetchMode mode, struct Array *dist
 				e->url = str_printf(pool, "%s%s", site, distfile->name);
 				SHA256Init(&e->checksum_ctx);
 				queue_push(distfile->queue, e);
-
-				switch (mode) {
-				case PARFETCH_FETCH:
-					break;
-				case PARFETCH_FETCH_LIST:
-				case PARFETCH_FETCH_URL_LIST_INT:
-					fprintf(stdout, "-o %s %s\n", e->filename, e->url);
-					break;
-				}
 			}
 		}
 	}
@@ -584,19 +542,11 @@ main(int argc, char *argv[])
 	unless (target) {
 		errx(1, "dp_TARGET not set in the environment");
 	}
-	enum ParfetchMode mode = PARFETCH_FETCH;
-	if (strcmp(target, "fetch-list") == 0) {
-		mode = PARFETCH_FETCH_LIST;
-	} else if (strcmp(target, "fetch-url-list-int") == 0) {;
-		mode = PARFETCH_FETCH_URL_LIST_INT;
-	} else if (strcmp(target, "do-fetch") == 0 || strcmp(target, "checksum") == 0 || strcmp(target, "makesum") == 0) {
-		mode = PARFETCH_FETCH;
-	} else {
-		errx(1, "unknown dp_TARGET value: %s", target);
+	unless (strcmp(target, "do-fetch") == 0 || strcmp(target, "checksum") == 0 || strcmp(target, "makesum") == 0) {
+		errx(1, "unsupported dp_TARGET value: %s", target);
 	}
 
-	create_distsubdirs(pool, mode, distfiles);
-	queue_distfiles(pool, mode, distfiles);
+	prepare_distfile_queues(pool, distfiles);
 
 	// Check file existence and checksums if requested
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
