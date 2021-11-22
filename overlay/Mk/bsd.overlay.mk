@@ -1,4 +1,13 @@
-PARFETCH?=	/home/tobias/src/github.com/t6/parfetch/_build/.bin/parfetch
+.if !defined(PARFETCH)
+# Try to use /usr/ports/.bin/parfetch if it exists. Users can
+# make it available to Poudriere by deploying it and enabling
+# this overlay without any further setup.
+.  if exists(${PORTSDIR}/.bin/parfetch})
+PARFETCH=	${PORTSDIR}/.bin/parfetch
+.  else
+PARFETCH=	parfetch
+.  endif
+.endif
 
 _DO_PARFETCH=	${SETENV} ${_DO_FETCH_ENV} ${_MASTER_SITES_ENV} ${_PATCH_SITES_ENV} dp_REAL_DISTDIR='${DISTDIR}' \
 			${PARFETCH} ${DISTFILES:C/.*/-d '&'/} ${PATCHFILES:C/:-p[0-9]//:C/.*/-p '&'/}
