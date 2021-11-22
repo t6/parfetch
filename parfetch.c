@@ -159,9 +159,17 @@ parse_distfile_arg(struct Mempool *pool, struct Map *distinfo, enum SitesType si
 	}
 
 	if (!makevar("NO_CHECKSUM") && !makevar("DISABLE_SIZE")) {
-		distfile->distinfo = map_get(distinfo, distfile->name);
+		SCOPE_MEMPOOL(pool);
+		const char *fullname;
+		const char *dist_subdir = getenv("dp_DIST_SUBDIR");
+		if (dist_subdir && strcmp(dist_subdir, "") != 0) {
+			fullname = str_printf(pool, "%s/%s", dist_subdir, distfile->name);
+		} else {
+			fullname = distfile->name;
+		}
+		distfile->distinfo = map_get(distinfo, fullname);
 		unless (distfile->distinfo) {
-			errx(1, "missing distinfo entry for %s", distfile->name);
+			errx(1, "missing distinfo entry for %s", fullname);
 		}
 	}
 
