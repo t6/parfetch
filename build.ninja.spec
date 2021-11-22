@@ -36,6 +36,11 @@ bundle libparfetch.a
 	mkdirs.c
 
 bin parfetch
+	LDADD += `pkg-config --libs libcurl libevent`
+	libias.a
+	libparfetch.a
+
+bin parfetch-static
 	LDADD += -static -Wl,--push-state -Wl,--static `pkg-config --static --libs libcurl libevent` -Wl,--pop-state
 	libias.a
 	libparfetch.a

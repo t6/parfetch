@@ -6,7 +6,9 @@
 # make it available to Poudriere by deploying it and enabling
 # this overlay without any further setup.
 # /work is ignored by git via the ports tree .gitignore.
-.  if exists(${PORTSDIR}/work/bin/parfetch)
+.  if exists(${PORTSDIR}/work/bin/parfetch-static)
+PARFETCH=	${PORTSDIR}/work/bin/parfetch-static
+.  elif exists(${PORTSDIR}/work/bin/parfetch)
 PARFETCH=	${PORTSDIR}/work/bin/parfetch
 .  else
 PARFETCH=	parfetch
