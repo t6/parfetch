@@ -44,3 +44,6 @@ bin parfetch-static
 	LDADD += -static -Wl,--push-state -Wl,--static `pkg-config --static --libs libcurl libevent` -Wl,--pop-state
 	libias.a
 	libparfetch.a
+
+install-data parfetch
+	overlay/Mk/bsd.overlay.mk
