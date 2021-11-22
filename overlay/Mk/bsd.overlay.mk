@@ -9,7 +9,7 @@ PARFETCH=	parfetch
 .  endif
 .endif
 
-_DO_PARFETCH=	${SETENV} ${_DO_FETCH_ENV} ${_MASTER_SITES_ENV} ${_PATCH_SITES_ENV} dp_REAL_DISTDIR='${DISTDIR}' \
+_DO_PARFETCH=	${SETENV} ${_DO_FETCH_ENV} ${_MASTER_SITES_ENV} ${_PATCH_SITES_ENV} \
 			${PARFETCH} ${DISTFILES:C/.*/-d '&'/} ${PATCHFILES:C/:-p[0-9]//:C/.*/-p '&'/}
 
 .if !target(do-fetch)
