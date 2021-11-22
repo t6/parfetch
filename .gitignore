@@ -1,0 +1,3 @@
+/_build/*
+/local.ninja
+/.ccls-cache

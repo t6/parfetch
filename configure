@@ -1,0 +1,2 @@
+#!/bin/sh
+exec libias/configure SRCDIR="${PWD}" "$@"

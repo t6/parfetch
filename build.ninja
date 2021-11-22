@@ -1,0 +1,4 @@
+# mkbuild generates build.ninja from build.ninja.spec. This file
+# is only for convenience to make ninja/samu work from the top
+# level directory.
+include _build/build.ninja
