@@ -59,6 +59,7 @@
 
 enum FetchDistfileNextReason {
 	FETCH_DISTFILE_NEXT_MIRROR,
+	FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH,
 	FETCH_DISTFILE_NEXT_SIZE_MISMATCH,
 };
 
@@ -95,6 +96,7 @@ struct DistfileQueueEntry {
 	struct Distfile *distfile;
 	const char *filename;
 	const char *url;
+	SHA2_CTX checksum_ctx;
 	curl_off_t size;
 };
 
@@ -263,6 +265,7 @@ queue_distfiles(struct Mempool *pool, enum ParfetchMode mode, struct Array *dist
 				e->distfile = distfile;
 				e->filename = str_dup(pool, distfile->name);
 				e->url = str_printf(pool, "%s%s", site, distfile->name);
+				SHA256Init(&e->checksum_ctx);
 				queue_push(distfile->queue, e);
 
 				switch (mode) {
@@ -314,6 +317,7 @@ fetch_distfile_write_cb(char *data, size_t size, size_t nmemb, void *userdata)
 	struct DistfileQueueEntry *queue_entry = userdata;
 	size_t written = fwrite(data, size, nmemb, queue_entry->distfile->fh);
 	queue_entry->size += written;
+	SHA256Update(&queue_entry->checksum_ctx, (u_int8_t *)data, written);
 	return written;
 }
 
@@ -372,6 +376,9 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 	switch (reason) {
 	case FETCH_DISTFILE_NEXT_MIRROR:
 		break;
+	case FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH:
+		fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", "checksum mismatch");
+		break;
 	case FETCH_DISTFILE_NEXT_SIZE_MISMATCH:
 		fprintf(stdout, "%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n",
 			"", queue_entry->distfile->distinfo->size, queue_entry->size);
@@ -402,8 +409,14 @@ check_multi_info(CURLM *cm)
 			switch (message->data.result) {
 			case CURLE_OK: // no error
 				if (queue_entry->size == queue_entry->distfile->distinfo->size) {
-					queue_entry->distfile->fetched = true;
-					fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+					char digest[SHA256_DIGEST_STRING_LENGTH + 1];
+					char *checksum = SHA256End(&queue_entry->checksum_ctx, digest);
+					if (checksum && strcmp(checksum, queue_entry->distfile->distinfo->checksum) != 0) {
+						fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH, NULL);
+					} else {
+						queue_entry->distfile->fetched = true;
+						fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+					}
 				} else if (queue_entry->distfile->distinfo->size) {
 					fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_SIZE_MISMATCH, NULL);
 				}
