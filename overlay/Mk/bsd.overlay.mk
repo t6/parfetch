@@ -2,17 +2,14 @@
 	!make(fetch-urlall-list) && !make(fetch-url-list)
 
 .if !defined(PARFETCH)
-# Try to use /usr/ports/work/bin/parfetch if it exists. Users can
-# make it available to Poudriere by deploying it and enabling
-# this overlay without any further setup.
-# /work is ignored by git via the ports tree .gitignore.
-.  if exists(${PORTSDIR}/work/bin/parfetch-static)
-PARFETCH=	${PORTSDIR}/work/bin/parfetch-static
-.  elif exists(${PORTSDIR}/work/bin/parfetch)
-PARFETCH=	${PORTSDIR}/work/bin/parfetch
-.  else
-PARFETCH=	parfetch
-.  endif
+# Try to use bin/parfetch-static from the overlay if it exists.
+# This makes it available to Poudriere without any further setup.
+.  for odir in ${OVERLAYS}
+.    if exists(${odir}/bin/parfetch-static)
+PARFETCH=	${odir}/bin/parfetch-static
+.    endif
+.  endfor
+PARFETCH?=	parfetch
 .endif
 
 # Global connection limit per CURLMOPT_MAX_TOTAL_CONNECTIONS(3)

@@ -33,3 +33,11 @@ bin parfetch-static
 
 install-data parfetch
 	overlay/Mk/bsd.overlay.mk
+
+ninja
+	rule hardlink-binary
+	  command = ln $in $out || cp $in $out
+	  description = LN $in $out
+	build $DESTDIR$SHAREDIR/parfetch/overlay/bin/parfetch-static: hardlink-binary $DESTDIR$BINDIR/parfetch-static
+
+default-install $DESTDIR$SHAREDIR/parfetch/overlay/bin/parfetch-static
