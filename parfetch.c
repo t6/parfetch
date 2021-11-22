@@ -63,6 +63,7 @@ enum FetchDistfileNextReason {
 	FETCH_DISTFILE_NEXT_MIRROR,
 	FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH,
 	FETCH_DISTFILE_NEXT_SIZE_MISMATCH,
+	FETCH_DISTFILE_NEXT_HTTP_ERROR,
 };
 
 enum SitesType {
@@ -373,6 +374,8 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 		fprintf(stdout, "%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n",
 			"", queue_entry->distfile->distinfo->size, queue_entry->size);
 		break;
+	case FETCH_DISTFILE_NEXT_HTTP_ERROR:
+		break;
 	}
 	if (msg) {
 		fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", msg);
@@ -397,8 +400,9 @@ check_multi_info(CURLM *cm)
 				fclose(queue_entry->distfile->fh);
 				queue_entry->distfile->fh = NULL;
 			}
-			switch (message->data.result) {
-			case CURLE_OK: // no error
+			long response_code = 0;
+			curl_easy_getinfo(message->easy_handle, CURLINFO_RESPONSE_CODE, &response_code);
+			if (response_code == 200 && message->data.result == CURLE_OK) { // no error
 				if (makevar("DISABLE_SIZE") || queue_entry->size == queue_entry->distfile->distinfo->size) {
 					if (makevar("NO_CHECKSUM")) {
 						queue_entry->distfile->fetched = true;
@@ -416,10 +420,14 @@ check_multi_info(CURLM *cm)
 				} else unless (makevar("DISABLE_SIZE")) {
 					fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_SIZE_MISMATCH, NULL);
 				}
-				break;
-			default: // error
-				fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_MIRROR, curl_easy_strerror(message->data.result));
-				break;
+			} else { // error
+				if (response_code > 0) {
+					SCOPE_MEMPOOL(pool);
+					const char *msg = str_printf(pool, "%ld", response_code);
+					fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_HTTP_ERROR, msg);
+				} else {
+					fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_MIRROR, curl_easy_strerror(message->data.result));
+				}
 			}
 			curl_multi_remove_handle(cm, message->easy_handle);
 			curl_easy_cleanup(message->easy_handle);
