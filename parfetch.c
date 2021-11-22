@@ -38,6 +38,7 @@
 #include <unistd.h>
 
 #include <curl/curl.h>
+#include <event2/event.h>
 #include <libias/array.h>
 #include <libias/color.h>
 #include <libias/flow.h>
@@ -89,8 +90,8 @@ struct Distfile *parse_distfile_arg(struct Mempool *, enum SitesType, const char
 static struct Map *load_distinfo(struct Mempool *);
 static void create_distsubdirs(struct Mempool *, enum ParfetchMode, struct Array *);
 static void queue_distfiles(struct Mempool *, enum ParfetchMode, struct Array *);
-static void add_transfer(CURLM *, struct Queue *);
-static size_t write_cb(char *, size_t, size_t, void *);
+static void fetch_distfile(CURLM *, struct Queue *);
+static size_t fetch_distfile_write_cb(char *, size_t, size_t, void *);
 
 struct Distfile *
 parse_distfile_arg(struct Mempool *pool, enum SitesType sites_type, const char *arg)
@@ -232,36 +233,205 @@ queue_distfiles(struct Mempool *pool, enum ParfetchMode mode, struct Array *dist
 }
 
 void
-add_transfer(CURLM *cm, struct Queue *distfile_queue)
+fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 {
 	struct DistfileQueueEntry *queue_entry = queue_pop(distfile_queue);
 	if (queue_entry) {
 		if (queue_entry->distfile->fh) {
 			fclose(queue_entry->distfile->fh);
 		}
-		queue_entry->distfile->fh = fopen(queue_entry->filename, "w");
+		queue_entry->distfile->fh = fopen(queue_entry->filename, "wb");
 		unless (queue_entry->distfile->fh) {
 			errx(1, "fopen: %s", queue_entry->filename);
 		}
 		CURL *eh = curl_easy_init();
-		curl_easy_setopt(eh, CURLOPT_WRITEFUNCTION, write_cb);
+		curl_easy_setopt(eh, CURLOPT_FOLLOWLOCATION, 1L);
+		curl_easy_setopt(eh, CURLOPT_WRITEFUNCTION, fetch_distfile_write_cb);
 		curl_easy_setopt(eh, CURLOPT_WRITEDATA, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_PRIVATE, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_URL, queue_entry->url);
 		curl_multi_add_handle(cm, eh);
 		fprintf(stderr, ANSI_COLOR_BLUE "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n",
-			"start", queue_entry->distfile->name, "", queue_entry->url);
+			"queued", queue_entry->distfile->name, "", queue_entry->url);
 	}
 }
 
 size_t
-write_cb(char *data, size_t size, size_t nmemb, void *userdata)
+fetch_distfile_write_cb(char *data, size_t size, size_t nmemb, void *userdata)
 {
 	// XXX: since we aren't doing anything special here maybe
 	// set CURLOPT_WRITEDATA to the FILE instead
 	struct DistfileQueueEntry *queue_entry = userdata;
 	size_t written = fwrite(data, size, nmemb, queue_entry->distfile->fh);
 	return written;
+}
+
+struct CurlContext {
+	struct CurlData *this;
+	struct event *event;
+	curl_socket_t sockfd;
+};
+
+struct CurlData {
+	CURLM *cm;
+	struct event_base *base;
+	struct event *timeout;
+};
+
+static struct CurlContext *curl_context_new(curl_socket_t, struct CurlData *);
+static void curl_context_free(struct CurlContext *);
+static void curl_perform(int, short, void *);
+static void check_multi_info(CURLM *);
+static void on_timeout(evutil_socket_t, short, void *);
+static int start_timeout(CURLM *, long, void *);
+static int handle_socket(CURL *, curl_socket_t, int, void *, void *);
+
+struct CurlContext *
+curl_context_new(curl_socket_t sockfd, struct CurlData *this)
+{
+	struct CurlContext *context = mempool_alloc(NULL, sizeof(struct CurlContext));
+	context->this = this;
+	context->sockfd = sockfd;
+	context->event = event_new(this->base, sockfd, 0, curl_perform, context);
+	return context;
+}
+
+void
+curl_context_free(struct CurlContext *context)
+{
+	event_del(context->event);
+	event_free(context->event);
+	free(context);
+}
+
+void
+curl_perform(int fd, short event, void *userdata)
+{
+	int flags = 0;
+
+	if (event & EV_READ) {
+		flags |= CURL_CSELECT_IN;
+	}
+	if (event & EV_WRITE) {
+		flags |= CURL_CSELECT_OUT;
+	}
+
+	struct CurlContext *context = userdata;
+	int running_handles;
+	CURLM *cm = context->this->cm; // context might be invalid after curl_multi_socket_action()
+	curl_multi_socket_action(cm, context->sockfd, flags, &running_handles);
+	check_multi_info(cm);
+}
+
+void
+check_multi_info(CURLM *cm)
+{
+	int pending;
+	CURLMsg *message;
+	while ((message = curl_multi_info_read(cm, &pending))) {
+		switch (message->msg) {
+		case CURLMSG_DONE: {
+			struct DistfileQueueEntry *queue_entry = NULL;
+			curl_easy_getinfo(message->easy_handle, CURLINFO_PRIVATE, &queue_entry);
+			if (queue_entry->distfile->fh) {
+				fclose(queue_entry->distfile->fh);
+			}
+			switch (message->data.result) {
+			case CURLE_OK: // no error
+				queue_entry->distfile->fetched = true;
+				fprintf(stderr, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+				break;
+			default: // error
+				queue_entry->distfile->fetched = false;
+				fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n%8sTrying next mirror...\n",
+					"error", queue_entry->distfile->name, "", queue_entry->url, "", curl_easy_strerror(message->data.result), "");
+				// queue next mirror for file
+				fetch_distfile(cm, queue_entry->distfile->queue);
+				break;
+			}
+			curl_multi_remove_handle(cm, message->easy_handle);
+			curl_easy_cleanup(message->easy_handle);
+			break;
+		} default:
+			fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%d\n", "error", message->msg);
+		break;
+		}
+	}
+}
+
+void
+on_timeout(evutil_socket_t fd, short events, void *userdata)
+{
+	struct CurlData *this = userdata;
+	int running_handles;
+	curl_multi_socket_action(this->cm, CURL_SOCKET_TIMEOUT, 0, &running_handles);
+	check_multi_info(this);
+}
+
+int
+start_timeout(CURLM *multi, long timeout_ms, void *userdata)
+{
+	struct CurlData *this = userdata;
+
+	if (timeout_ms < 0) {
+		evtimer_del(this->timeout);
+	} else {
+		if (timeout_ms == 0) {
+			timeout_ms = 1; // 0 means directly call socket_action, but we will do it in a bit
+			struct timeval tv;
+			tv.tv_sec = timeout_ms / 1000;
+			tv.tv_usec = (timeout_ms % 1000) * 1000;
+			evtimer_del(this->timeout);
+			evtimer_add(this->timeout, &tv);
+		}
+	}
+
+	return 0;
+}
+
+int
+handle_socket(CURL *easy, curl_socket_t s, int action, void *userdata, void *socketp)
+{
+	struct CurlData *this = userdata;
+
+	switch(action) {
+	case CURL_POLL_IN:
+	case CURL_POLL_OUT:
+	case CURL_POLL_INOUT: {
+		struct CurlContext *curl_context;
+		if (socketp) {
+			curl_context = socketp;
+		} else {
+			curl_context = curl_context_new(s, this);
+		}
+		curl_multi_assign(this->cm, s, curl_context);
+
+		int events = 0;
+		if (action != CURL_POLL_IN) {
+			events |= EV_WRITE;
+		}
+		if (action != CURL_POLL_OUT) {
+			events |= EV_READ;
+		}
+		events |= EV_PERSIST;
+
+		event_del(curl_context->event);
+		event_assign(curl_context->event, this->base, curl_context->sockfd, events, curl_perform, curl_context);
+		event_add(curl_context->event, NULL);
+		break;
+	} case CURL_POLL_REMOVE:
+		if (socketp) {
+			struct CurlContext *curl_context = socketp;
+			event_del(curl_context->event);
+			curl_context_free(curl_context);
+			curl_multi_assign(this->cm, s, NULL);
+		}
+		break;
+	default:
+		abort();
+	}
+
+	return 0;
 }
 
 int
@@ -317,8 +487,26 @@ main(int argc, char *argv[])
 	create_distsubdirs(pool, mode, distfiles);
 	queue_distfiles(pool, mode, distfiles);
 
-	curl_global_init(CURL_GLOBAL_ALL);
+	// Check file existence and checksums if requested
+	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
+	}
+
+	if (curl_global_init(CURL_GLOBAL_ALL)) {
+		errx(1, "could not init curl\n");
+	}
+
+	struct CurlData *this = mempool_alloc(pool, sizeof(struct CurlData));
 	CURLM *cm = curl_multi_init();
+	this->cm = cm;
+	struct event_base *base = event_base_new();
+	this->base = base;
+	struct event *timeout = evtimer_new(base, on_timeout, this);
+	this->timeout = timeout;
+
+	curl_multi_setopt(cm, CURLMOPT_SOCKETFUNCTION, handle_socket);
+	curl_multi_setopt(cm, CURLMOPT_SOCKETDATA, this);
+	curl_multi_setopt(cm, CURLMOPT_TIMERFUNCTION, start_timeout);
+	curl_multi_setopt(cm, CURLMOPT_TIMERDATA, this);
 
 	// max connects per host
 	curl_multi_setopt(cm, CURLMOPT_MAXCONNECTS, (long)2);
@@ -326,44 +514,15 @@ main(int argc, char *argv[])
 	curl_multi_setopt(cm, CURLMOPT_MAX_TOTAL_CONNECTIONS, (long)4);
 
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
-		add_transfer(cm, distfile->queue);
+		fetch_distfile(cm, distfile->queue);
 	}
 
-	int still_alive = 1;
-	do {
-		curl_multi_perform(cm, &still_alive);
-
-		CURLMsg *msg;
-		int msgs_left = -1;
-		while ((msg = curl_multi_info_read(cm, &msgs_left))) {
-			puts("here");
-			if (msg->msg == CURLMSG_DONE) {
-				CURL *e = msg->easy_handle;
-				struct DistfileQueueEntry *queue_entry = NULL;
-				curl_easy_getinfo(msg->easy_handle, CURLINFO_PRIVATE, &queue_entry);
-				if (msg->data.result == CURLE_OK) { // no error
-					queue_entry->distfile->fetched = true;
-					fprintf(stderr, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "ok", queue_entry->distfile->name);
-				} else { // failed
-					queue_entry->distfile->fetched = false;
-					fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n%8sTrying next mirror...\n",
-						"error", queue_entry->distfile->name, "", queue_entry->url, "", curl_easy_strerror(msg->data.result), "");
-					// queue next mirror for file
-					add_transfer(cm, queue_entry->distfile->queue);
-				}
-				fclose(queue_entry->distfile->fh);
-				curl_multi_remove_handle(cm, e);
-				curl_easy_cleanup(e);
-			} else {
-				fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%d\n", "error", msg->msg);
-			}
-		}
-
-		// wait for activity, timeout or "nothing"
-		curl_multi_wait(cm, NULL, 0, 1000, NULL);
-	} while (still_alive);
+	event_base_dispatch(base);
 
 	curl_multi_cleanup(cm);
+	event_free(timeout);
+	event_base_free(base);
+	libevent_global_shutdown();
 	curl_global_cleanup();
 
 	return 0;

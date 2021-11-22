@@ -31,10 +31,10 @@ bundle libias.a
 	libias/util.c
 
 bundle libparfetch.a
-	CFLAGS += `pkg-config --cflags libcurl`
+	CFLAGS += `pkg-config --cflags libcurl libevent`
 	parfetch.c
 
 bin parfetch
-	LDADD += -static -Wl,--push-state -Wl,--static `pkg-config --static --libs libcurl` -Wl,--pop-state
+	LDADD += -static -Wl,--push-state -Wl,--static `pkg-config --static --libs libcurl libevent` -Wl,--pop-state
 	libias.a
 	libparfetch.a
