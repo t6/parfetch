@@ -52,6 +52,11 @@
 
 #define MAX_PARALLEL 3 /* number of simultaneous transfers */
 
+enum FetchDistfileNextReason {
+	FETCH_DISTFILE_NEXT_MIRROR,
+	FETCH_DISTFILE_NEXT_SIZE_MISMATCH,
+};
+
 enum ParfetchMode {
 	PARFETCH_DO_FETCH,
 	PARFETCH_FETCH_LIST,
@@ -105,6 +110,7 @@ static struct Map *load_distinfo(struct Mempool *);
 static void create_distsubdirs(struct Mempool *, enum ParfetchMode, struct Array *);
 static void queue_distfiles(struct Mempool *, enum ParfetchMode, struct Array *);
 static void fetch_distfile(CURLM *, struct Queue *);
+static void fetch_distfile_next_mirror(struct DistfileQueueEntry *, CURLM *, enum FetchDistfileNextReason, const char *);
 static size_t fetch_distfile_write_cb(char *, size_t, size_t, void *);
 static struct CurlContext *curl_context_new(curl_socket_t, struct CurlData *);
 static void curl_context_free(struct CurlContext *);
@@ -341,6 +347,38 @@ curl_perform(int fd, short event, void *userdata)
 }
 
 void
+fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, enum FetchDistfileNextReason reason, const char *msg)
+{
+	const char *next_mirror_msg = "Trying next mirror...";
+	if (queue_len(queue_entry->distfile->queue) == 0) {
+		next_mirror_msg = "No more mirrors left!";
+	}
+
+	// Try to delete the file
+	unlink(queue_entry->distfile->name);
+	queue_entry->distfile->fetched = false;
+
+	fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", queue_entry->distfile->name);
+	fprintf(stdout, "%8s%s\n", "", queue_entry->url);
+
+	switch (reason) {
+	case FETCH_DISTFILE_NEXT_MIRROR:
+		break;
+	case FETCH_DISTFILE_NEXT_SIZE_MISMATCH:
+		fprintf(stdout, "%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n",
+			"", queue_entry->distfile->distinfo->size, queue_entry->size);
+		break;
+	}
+	if (msg) {
+		fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", msg);
+	}
+
+	// queue next mirror for file
+	fprintf(stdout, "%8s%s\n", "", next_mirror_msg);
+	fetch_distfile(cm, queue_entry->distfile->queue);
+}
+
+void
 check_multi_info(CURLM *cm)
 {
 	int pending;
@@ -353,36 +391,17 @@ check_multi_info(CURLM *cm)
 			if (queue_entry->distfile->fh) {
 				fclose(queue_entry->distfile->fh);
 			}
-			const char *next_mirror_msg = "Trying next mirror...";
-			if (queue_len(queue_entry->distfile->queue) == 0) {
-				next_mirror_msg = "No more mirrors left!";
-			}
 			switch (message->data.result) {
 			case CURLE_OK: // no error
 				if (queue_entry->size == queue_entry->distfile->distinfo->size) {
 					queue_entry->distfile->fetched = true;
 					fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
 				} else if (queue_entry->distfile->distinfo->size) {
-					// Try to delete the file
-					unlink(queue_entry->distfile->name);
-					queue_entry->distfile->fetched = false;
-					fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", queue_entry->distfile->name);
-					fprintf(stdout, "%8s%s\n", "", queue_entry->url);
-					fprintf(stdout, "%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n",
-						"", queue_entry->distfile->distinfo->size, queue_entry->size);
-					fprintf(stdout, "%8s%s\n", "", next_mirror_msg);
-					// queue next mirror for file
-					fetch_distfile(cm, queue_entry->distfile->queue);
+					fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_SIZE_MISMATCH, NULL);
 				}
 				break;
 			default: // error
-				queue_entry->distfile->fetched = false;
-				fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", queue_entry->distfile->name);
-				fprintf(stdout, "%8s%s\n", "", queue_entry->url);
-				fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", curl_easy_strerror(message->data.result));
-				fprintf(stdout, "%8s%s\n", "", next_mirror_msg);
-				// queue next mirror for file
-				fetch_distfile(cm, queue_entry->distfile->queue);
+				fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_MIRROR, curl_easy_strerror(message->data.result));
 				break;
 			}
 			curl_multi_remove_handle(cm, message->easy_handle);
