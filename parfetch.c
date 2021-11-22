@@ -238,6 +238,10 @@ queue_distfiles(struct Mempool *pool, enum ParfetchMode mode, struct Array *dist
 					errx(1, "cannot find %s%s for %s group", env_prefix[distfile->sites_type], group, group);
 				}
 				sites = str_split(pool, str_dup(pool, sitesenv), " ");
+				const char *master_site_backup = getenv("dp_MASTER_SITE_BACKUP");
+				if (master_site_backup && strcmp(master_site_backup, "") != 0) {
+					ARRAY_JOIN(sites, str_split(pool, str_dup(pool, master_site_backup), " "));
+				}
 				map_add(groupsites[distfile->sites_type], group, sites);
 			}
 
