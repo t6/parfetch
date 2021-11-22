@@ -67,34 +67,55 @@ enum SitesType {
 struct DistinfoEntry {
 	const char *name;
 	const char *checksum;
-	const char *size;
+	curl_off_t size;
 };
 
 struct Distfile {
 	enum SitesType sites_type;
-	bool fetched;
 	const char *name;
+	bool fetched;
 	struct Array *groups;
 	struct Queue *queue;
 	FILE *fh;
+	struct DistinfoEntry *distinfo;
 };
 
 struct DistfileQueueEntry {
 	struct Distfile *distfile;
 	const char *filename;
 	const char *url;
+	curl_off_t size;
+};
+
+struct CurlContext {
+	struct CurlData *this;
+	struct event *event;
+	curl_socket_t sockfd;
+};
+
+struct CurlData {
+	CURLM *cm;
+	struct event_base *base;
+	struct event *timeout;
 };
 
 // Prototypes
-struct Distfile *parse_distfile_arg(struct Mempool *, enum SitesType, const char *);
+struct Distfile *parse_distfile_arg(struct Mempool *, struct Map *, enum SitesType, const char *);
 static struct Map *load_distinfo(struct Mempool *);
 static void create_distsubdirs(struct Mempool *, enum ParfetchMode, struct Array *);
 static void queue_distfiles(struct Mempool *, enum ParfetchMode, struct Array *);
 static void fetch_distfile(CURLM *, struct Queue *);
 static size_t fetch_distfile_write_cb(char *, size_t, size_t, void *);
+static struct CurlContext *curl_context_new(curl_socket_t, struct CurlData *);
+static void curl_context_free(struct CurlContext *);
+static void curl_perform(int, short, void *);
+static void check_multi_info(CURLM *);
+static void on_timeout(evutil_socket_t, short, void *);
+static int start_timeout(CURLM *, long, void *);
+static int handle_socket(CURL *, curl_socket_t, int, void *, void *);
 
 struct Distfile *
-parse_distfile_arg(struct Mempool *pool, enum SitesType sites_type, const char *arg)
+parse_distfile_arg(struct Mempool *pool, struct Map *distinfo, enum SitesType sites_type, const char *arg)
 {
 	struct Distfile *distfile = mempool_alloc(pool, sizeof(struct Distfile));
 	distfile->sites_type = sites_type;
@@ -107,6 +128,11 @@ parse_distfile_arg(struct Mempool *pool, enum SitesType sites_type, const char *
 		distfile->groups = str_split(pool, groups + 1, ",");
 	} else {
 		distfile->groups = MEMPOOL_ARRAY(pool, "DEFAULT");
+	}
+
+	distfile->distinfo = map_get(distinfo, distfile->name);
+	unless (distfile->distinfo) {
+		err(1, "missing distinfo entry for %s", distfile->name);
 	}
 
 	return distfile;
@@ -157,7 +183,11 @@ load_distinfo(struct Mempool *extpool)
 		if (checksum) {
 			entry->checksum = str_dup(extpool, checksum);
 		} else if (size) {
-			entry->size = str_dup(extpool, size);
+			const char *errstr = NULL;
+			entry->size = strtonum(size, 1, INT64_MAX, &errstr);
+			if (errstr) {
+				errx(1, "size for %s: %s", entry->name, errstr);
+			}
 		}
 	}
 
@@ -250,6 +280,9 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 		curl_easy_setopt(eh, CURLOPT_WRITEDATA, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_PRIVATE, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_URL, queue_entry->url);
+		if (queue_entry->distfile->distinfo->size) {
+			curl_easy_setopt(eh, CURLOPT_MAXFILESIZE_LARGE, queue_entry->distfile->distinfo->size);
+		}
 		curl_multi_add_handle(cm, eh);
 		fprintf(stderr, ANSI_COLOR_BLUE "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n",
 			"queued", queue_entry->distfile->name, "", queue_entry->url);
@@ -259,32 +292,11 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 size_t
 fetch_distfile_write_cb(char *data, size_t size, size_t nmemb, void *userdata)
 {
-	// XXX: since we aren't doing anything special here maybe
-	// set CURLOPT_WRITEDATA to the FILE instead
 	struct DistfileQueueEntry *queue_entry = userdata;
 	size_t written = fwrite(data, size, nmemb, queue_entry->distfile->fh);
+	queue_entry->size += written;
 	return written;
 }
-
-struct CurlContext {
-	struct CurlData *this;
-	struct event *event;
-	curl_socket_t sockfd;
-};
-
-struct CurlData {
-	CURLM *cm;
-	struct event_base *base;
-	struct event *timeout;
-};
-
-static struct CurlContext *curl_context_new(curl_socket_t, struct CurlData *);
-static void curl_context_free(struct CurlContext *);
-static void curl_perform(int, short, void *);
-static void check_multi_info(CURLM *);
-static void on_timeout(evutil_socket_t, short, void *);
-static int start_timeout(CURLM *, long, void *);
-static int handle_socket(CURL *, curl_socket_t, int, void *, void *);
 
 struct CurlContext *
 curl_context_new(curl_socket_t sockfd, struct CurlData *this)
@@ -336,15 +348,29 @@ check_multi_info(CURLM *cm)
 			if (queue_entry->distfile->fh) {
 				fclose(queue_entry->distfile->fh);
 			}
+			const char *next_mirror_msg = "Trying next mirror...";
+			if (queue_len(queue_entry->distfile->queue) == 0) {
+				next_mirror_msg = "No more mirrors left!";
+			}
 			switch (message->data.result) {
 			case CURLE_OK: // no error
-				queue_entry->distfile->fetched = true;
-				fprintf(stderr, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+				if (queue_entry->size == queue_entry->distfile->distinfo->size) {
+					queue_entry->distfile->fetched = true;
+					fprintf(stderr, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+				} else if (queue_entry->distfile->distinfo->size) {
+					// Try to delete the file
+					unlink(queue_entry->distfile->name);
+					queue_entry->distfile->fetched = false;
+					fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n%8s%s\n",
+						"error", queue_entry->distfile->name, "", queue_entry->url, "", queue_entry->distfile->distinfo->size, queue_entry->size, "", next_mirror_msg);
+					// queue next mirror for file
+					fetch_distfile(cm, queue_entry->distfile->queue);
+				}
 				break;
 			default: // error
 				queue_entry->distfile->fetched = false;
-				fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n%8sTrying next mirror...\n",
-					"error", queue_entry->distfile->name, "", queue_entry->url, "", curl_easy_strerror(message->data.result), "");
+				fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n%8s%s\n",
+					"error", queue_entry->distfile->name, "", queue_entry->url, "", curl_easy_strerror(message->data.result), "", next_mirror_msg);
 				// queue next mirror for file
 				fetch_distfile(cm, queue_entry->distfile->queue);
 				break;
@@ -447,15 +473,16 @@ main(int argc, char *argv[])
 		err(1, "chdir: %s", distdir);
 	}
 
+	struct Map *distinfo = load_distinfo(pool);
 	struct Array *distfiles = mempool_array(pool);
 	int ch;
 	while ((ch = getopt(argc, argv, "d:p:")) != -1) {
 		switch (ch) {
 		case 'd':
-			array_append(distfiles, parse_distfile_arg(pool, MASTER_SITES, optarg));
+			array_append(distfiles, parse_distfile_arg(pool, distinfo, MASTER_SITES, optarg));
 			break;
 		case 'p':
-			array_append(distfiles, parse_distfile_arg(pool, PATCH_SITES, optarg));
+			array_append(distfiles, parse_distfile_arg(pool, distinfo, PATCH_SITES, optarg));
 			break;
 		case '?':
 		default:
@@ -464,8 +491,6 @@ main(int argc, char *argv[])
 	}
 	argc -= optind;
 	argv += optind;
-
-	struct Map *distinfo = load_distinfo(pool);
 
 	const char *target = getenv("dp_TARGET");
 	unless (target) {
@@ -517,6 +542,7 @@ main(int argc, char *argv[])
 		fetch_distfile(cm, distfile->queue);
 	}
 
+	// do the work
 	event_base_dispatch(base);
 
 	curl_multi_cleanup(cm);
@@ -525,5 +551,17 @@ main(int argc, char *argv[])
 	libevent_global_shutdown();
 	curl_global_cleanup();
 
-	return 0;
+	// Close/flush all open files and check that we fetched all of them
+	bool all_fetched = true;
+	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
+		if (distfile->fh) {
+			fclose(distfile->fh);
+		}
+		all_fetched = all_fetched && distfile->fetched;
+	}
+	if (all_fetched) {
+		return 0;
+	} else {
+		errx(1, "could not fetch all distfiles");
+	}
 }
