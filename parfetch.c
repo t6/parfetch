@@ -284,8 +284,9 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 			curl_easy_setopt(eh, CURLOPT_MAXFILESIZE_LARGE, queue_entry->distfile->distinfo->size);
 		}
 		curl_multi_add_handle(cm, eh);
-		fprintf(stderr, ANSI_COLOR_BLUE "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n",
-			"queued", queue_entry->distfile->name, "", queue_entry->url);
+		fprintf(stdout, ANSI_COLOR_BLUE "%-8s" ANSI_COLOR_RESET "%s\n",
+			"queued", queue_entry->distfile->name);
+		fprintf(stdout, "%8s%s\n", "", queue_entry->url);
 	}
 }
 
@@ -356,21 +357,26 @@ check_multi_info(CURLM *cm)
 			case CURLE_OK: // no error
 				if (queue_entry->size == queue_entry->distfile->distinfo->size) {
 					queue_entry->distfile->fetched = true;
-					fprintf(stderr, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+					fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
 				} else if (queue_entry->distfile->distinfo->size) {
 					// Try to delete the file
 					unlink(queue_entry->distfile->name);
 					queue_entry->distfile->fetched = false;
-					fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n%8s%s\n",
-						"error", queue_entry->distfile->name, "", queue_entry->url, "", queue_entry->distfile->distinfo->size, queue_entry->size, "", next_mirror_msg);
+					fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", queue_entry->distfile->name);
+					fprintf(stdout, "%8s%s\n", "", queue_entry->url);
+					fprintf(stdout, "%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n",
+						"", queue_entry->distfile->distinfo->size, queue_entry->size);
+					fprintf(stdout, "%8s%s\n", "", next_mirror_msg);
 					// queue next mirror for file
 					fetch_distfile(cm, queue_entry->distfile->queue);
 				}
 				break;
 			default: // error
 				queue_entry->distfile->fetched = false;
-				fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s \n%8s%s\n%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n%8s%s\n",
-					"error", queue_entry->distfile->name, "", queue_entry->url, "", curl_easy_strerror(message->data.result), "", next_mirror_msg);
+				fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", queue_entry->distfile->name);
+				fprintf(stdout, "%8s%s\n", "", queue_entry->url);
+				fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", curl_easy_strerror(message->data.result));
+				fprintf(stdout, "%8s%s\n", "", next_mirror_msg);
 				// queue next mirror for file
 				fetch_distfile(cm, queue_entry->distfile->queue);
 				break;
@@ -379,7 +385,7 @@ check_multi_info(CURLM *cm)
 			curl_easy_cleanup(message->easy_handle);
 			break;
 		} default:
-			fprintf(stderr, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%d\n", "error", message->msg);
+			fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%d\n", "error", message->msg);
 		break;
 		}
 	}
