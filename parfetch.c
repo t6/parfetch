@@ -26,11 +26,16 @@
 
 #include "config.h"
 
+#include <sys/stat.h>
+#include <sys/types.h>
 #if HAVE_ERR
 # include <err.h>
 #endif
 #include <fcntl.h>
 #include <libgen.h>
+#if HAVE_SHA2
+# include <sha2.h>
+#endif
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,7 +63,8 @@ enum FetchDistfileNextReason {
 };
 
 enum ParfetchMode {
-	PARFETCH_DO_FETCH,
+	PARFETCH_CHECKSUM,
+	PARFETCH_FETCH,
 	PARFETCH_FETCH_LIST,
 	PARFETCH_FETCH_URL_LIST_INT,
 	PARFETCH_MAKESUM,
@@ -215,7 +221,8 @@ create_distsubdirs(struct Mempool *pool, enum ParfetchMode mode, struct Array *d
 	}
 
 	switch (mode) {
-		case PARFETCH_DO_FETCH:
+		case PARFETCH_CHECKSUM:
+		case PARFETCH_FETCH:
 		case PARFETCH_MAKESUM:
 			break;
 		case PARFETCH_FETCH_LIST:
@@ -259,8 +266,9 @@ queue_distfiles(struct Mempool *pool, enum ParfetchMode mode, struct Array *dist
 				queue_push(distfile->queue, e);
 
 				switch (mode) {
-				case PARFETCH_DO_FETCH:
+				case PARFETCH_CHECKSUM:
 				case PARFETCH_MAKESUM:
+				case PARFETCH_FETCH:
 					break;
 				case PARFETCH_FETCH_LIST:
 				case PARFETCH_FETCH_URL_LIST_INT:
@@ -525,13 +533,15 @@ main(int argc, char *argv[])
 	unless (target) {
 		errx(1, "dp_TARGET not set in the environment");
 	}
-	enum ParfetchMode mode = PARFETCH_DO_FETCH;
+	enum ParfetchMode mode = PARFETCH_FETCH;
 	if (strcmp(target, "fetch-list") == 0) {
 		mode = PARFETCH_FETCH_LIST;
 	} else if (strcmp(target, "fetch-url-list-int") == 0) {;
 		mode = PARFETCH_FETCH_URL_LIST_INT;
 	} else if (strcmp(target, "do-fetch") == 0) {
-		mode = PARFETCH_DO_FETCH;
+		mode = PARFETCH_FETCH;
+	} else if (strcmp(target, "checksum") == 0) {
+		mode = PARFETCH_CHECKSUM;
 	} else if (strcmp(target, "makesum") == 0) {
 		mode = PARFETCH_MAKESUM;
 	} else {
@@ -543,6 +553,33 @@ main(int argc, char *argv[])
 
 	// Check file existence and checksums if requested
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
+		struct stat st;
+		if (stat(distfile->name, &st) >= 0) {
+			if (distfile->distinfo->size == st.st_size) {
+				char buf[SHA256_DIGEST_STRING_LENGTH];
+				char *checksum = SHA256File(distfile->name, buf);
+				if (checksum && strcmp(checksum, distfile->distinfo->checksum) == 0) {
+					distfile->fetched = true;
+					fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "sha256", distfile->name);
+				} else {
+					distfile->fetched = false;
+					fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", distfile->name);
+					fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", "checksum mismatch");
+					fprintf(stdout, "%8s%s\n", "", "Refetching...");
+					unlink(distfile->name);
+				}
+			} else {
+				distfile->fetched = false;
+				fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", distfile->name);
+				fprintf(stdout, "%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n",
+					"", distfile->distinfo->size, st.st_size);
+				fprintf(stdout, "%8s%s\n", "", "Refetching...");
+				unlink(distfile->name);
+			}
+		} else {
+			distfile->fetched = false;
+			fprintf(stdout, ANSI_COLOR_BLUE "%-8s" ANSI_COLOR_RESET "%s\n", "missing", distfile->name);
+		}
 	}
 
 	if (curl_global_init(CURL_GLOBAL_ALL)) {
@@ -568,7 +605,9 @@ main(int argc, char *argv[])
 	curl_multi_setopt(cm, CURLMOPT_MAX_TOTAL_CONNECTIONS, (long)4);
 
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
-		fetch_distfile(cm, distfile->queue);
+		unless (distfile->fetched) {
+			fetch_distfile(cm, distfile->queue);
+		}
 	}
 
 	// do the work

@@ -17,6 +17,13 @@ do-fetch:
 	@${_DO_PARFETCH}
 .endif
 
+.if !target(checksum)
+checksum:
+.  if !defined(NO_CHECKSUM)
+	@${_DO_PARFETCH}
+.  endif
+.endif
+
 # The following aren't really supported.
 
 .if !target(fetch-list)
