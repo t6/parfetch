@@ -64,11 +64,9 @@ enum FetchDistfileNextReason {
 };
 
 enum ParfetchMode {
-	PARFETCH_CHECKSUM,
 	PARFETCH_FETCH,
 	PARFETCH_FETCH_LIST,
 	PARFETCH_FETCH_URL_LIST_INT,
-	PARFETCH_MAKESUM,
 };
 
 enum SitesType {
@@ -113,7 +111,8 @@ struct CurlData {
 };
 
 // Prototypes
-struct Distfile *parse_distfile_arg(struct Mempool *, struct Map *, enum SitesType, const char *);
+static const char *makevar(const char *);
+static struct Distfile *parse_distfile_arg(struct Mempool *, struct Map *, enum SitesType, const char *);
 static struct Map *load_distinfo(struct Mempool *);
 static void create_distsubdirs(struct Mempool *, enum ParfetchMode, struct Array *);
 static void queue_distfiles(struct Mempool *, enum ParfetchMode, struct Array *);
@@ -127,6 +126,19 @@ static void check_multi_info(CURLM *);
 static void on_timeout(evutil_socket_t, short, void *);
 static int start_timeout(CURLM *, long, void *);
 static int handle_socket(CURL *, curl_socket_t, int, void *, void *);
+
+const char *
+makevar(const char *var)
+{
+	SCOPE_MEMPOOL(pool);
+	const char *key = str_printf(pool, "dp_%s", var);
+	const char *env = getenv(key);
+	if (env && strcmp(env, "") != 0) {
+		return env;
+	} else {
+		return NULL;
+	}
+}
 
 struct Distfile *
 parse_distfile_arg(struct Mempool *pool, struct Map *distinfo, enum SitesType sites_type, const char *arg)
@@ -144,9 +156,11 @@ parse_distfile_arg(struct Mempool *pool, struct Map *distinfo, enum SitesType si
 		distfile->groups = MEMPOOL_ARRAY(pool, "DEFAULT");
 	}
 
-	distfile->distinfo = map_get(distinfo, distfile->name);
-	unless (distfile->distinfo) {
-		err(1, "missing distinfo entry for %s", distfile->name);
+	if (!makevar("NO_CHECKSUM") && !makevar("DISABLE_SIZE")) {
+		distfile->distinfo = map_get(distinfo, distfile->name);
+		unless (distfile->distinfo) {
+			errx(1, "missing distinfo entry for %s", distfile->name);
+		}
 	}
 
 	return distfile;
@@ -157,17 +171,22 @@ load_distinfo(struct Mempool *extpool)
 {
 	SCOPE_MEMPOOL(pool);
 
-	const char *distinfo_file = getenv("dp_DISTINFO_FILE");
+	const char *distinfo_file = makevar("DISTINFO_FILE");
 	unless (distinfo_file) {
 		errx(1, "dp_DISTINFO_FILE not set in the environment");
 	}
 
+	struct Map *distinfo = mempool_map(extpool, str_compare, NULL);
 	FILE *f = mempool_fopenat(pool, AT_FDCWD, distinfo_file, "r", 0);
 	unless (f) {
-		errx(1, "could not open %s", distinfo_file);
+		if (makevar("NO_CHECKSUM") && makevar("DISABLE_SIZE")) {
+			warn("could not open %s", distinfo_file);
+			return distinfo;
+		} else {
+			err(1, "could not open %s", distinfo_file);
+		}
 	}
 
-	struct Map *distinfo = mempool_map(extpool, str_compare, NULL);
 	LINE_FOREACH(f, line) {
 		struct Array *fields = str_split(pool, line, " ");
 		if (array_len(fields) != 4) {
@@ -223,9 +242,7 @@ create_distsubdirs(struct Mempool *pool, enum ParfetchMode mode, struct Array *d
 	}
 
 	switch (mode) {
-		case PARFETCH_CHECKSUM:
 		case PARFETCH_FETCH:
-		case PARFETCH_MAKESUM:
 			break;
 		case PARFETCH_FETCH_LIST:
 		case PARFETCH_FETCH_URL_LIST_INT:
@@ -253,7 +270,7 @@ queue_distfiles(struct Mempool *pool, enum ParfetchMode mode, struct Array *dist
 					errx(1, "cannot find %s%s for %s group", env_prefix[distfile->sites_type], group, group);
 				}
 				sites = str_split(pool, str_dup(pool, sitesenv), " ");
-				const char *master_site_backup = getenv("dp_MASTER_SITE_BACKUP");
+				const char *master_site_backup = makevar("MASTER_SITE_BACKUP");
 				if (master_site_backup && strcmp(master_site_backup, "") != 0) {
 					ARRAY_JOIN(sites, str_split(pool, str_dup(pool, master_site_backup), " "));
 				}
@@ -269,8 +286,6 @@ queue_distfiles(struct Mempool *pool, enum ParfetchMode mode, struct Array *dist
 				queue_push(distfile->queue, e);
 
 				switch (mode) {
-				case PARFETCH_CHECKSUM:
-				case PARFETCH_MAKESUM:
 				case PARFETCH_FETCH:
 					break;
 				case PARFETCH_FETCH_LIST:
@@ -301,7 +316,7 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 		curl_easy_setopt(eh, CURLOPT_WRITEDATA, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_PRIVATE, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_URL, queue_entry->url);
-		if (queue_entry->distfile->distinfo->size) {
+		unless (makevar("DISABLE_SIZE")) {
 			curl_easy_setopt(eh, CURLOPT_MAXFILESIZE_LARGE, queue_entry->distfile->distinfo->size);
 		}
 		curl_multi_add_handle(cm, eh);
@@ -405,19 +420,25 @@ check_multi_info(CURLM *cm)
 			curl_easy_getinfo(message->easy_handle, CURLINFO_PRIVATE, &queue_entry);
 			if (queue_entry->distfile->fh) {
 				fclose(queue_entry->distfile->fh);
+				queue_entry->distfile->fh = NULL;
 			}
 			switch (message->data.result) {
 			case CURLE_OK: // no error
-				if (queue_entry->size == queue_entry->distfile->distinfo->size) {
-					char digest[SHA256_DIGEST_STRING_LENGTH + 1];
-					char *checksum = SHA256End(&queue_entry->checksum_ctx, digest);
-					if (checksum && strcmp(checksum, queue_entry->distfile->distinfo->checksum) != 0) {
-						fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH, NULL);
-					} else {
+				if (makevar("DISABLE_SIZE") || queue_entry->size == queue_entry->distfile->distinfo->size) {
+					if (makevar("NO_CHECKSUM")) {
 						queue_entry->distfile->fetched = true;
 						fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+					} else {
+						char digest[SHA256_DIGEST_STRING_LENGTH + 1];
+						char *checksum = SHA256End(&queue_entry->checksum_ctx, digest);
+						if (checksum && strcmp(checksum, queue_entry->distfile->distinfo->checksum) != 0) {
+							fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH, NULL);
+						} else {
+							queue_entry->distfile->fetched = true;
+							fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+						}
 					}
-				} else if (queue_entry->distfile->distinfo->size) {
+				} else unless (makevar("DISABLE_SIZE")) {
 					fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_SIZE_MISMATCH, NULL);
 				}
 				break;
@@ -515,7 +536,7 @@ main(int argc, char *argv[])
 {
 	struct Mempool *pool = mempool_new(); // XXX: pool might outlive main() via libcurl!
 
-	const char *distdir = getenv("dp_DISTDIR");
+	const char *distdir = makevar("DISTDIR");
 	unless (distdir) {
 		errx(1, "dp_DISTDIR not set in the environment");
 	}
@@ -542,7 +563,7 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	const char *target = getenv("dp_TARGET");
+	const char *target = makevar("TARGET");
 	unless (target) {
 		errx(1, "dp_TARGET not set in the environment");
 	}
@@ -551,12 +572,8 @@ main(int argc, char *argv[])
 		mode = PARFETCH_FETCH_LIST;
 	} else if (strcmp(target, "fetch-url-list-int") == 0) {;
 		mode = PARFETCH_FETCH_URL_LIST_INT;
-	} else if (strcmp(target, "do-fetch") == 0) {
+	} else if (strcmp(target, "do-fetch") == 0 || strcmp(target, "checksum") == 0 || strcmp(target, "makesum") == 0) {
 		mode = PARFETCH_FETCH;
-	} else if (strcmp(target, "checksum") == 0) {
-		mode = PARFETCH_CHECKSUM;
-	} else if (strcmp(target, "makesum") == 0) {
-		mode = PARFETCH_MAKESUM;
 	} else {
 		errx(1, "unknown dp_TARGET value: %s", target);
 	}
@@ -568,18 +585,22 @@ main(int argc, char *argv[])
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
 		struct stat st;
 		if (stat(distfile->name, &st) >= 0) {
-			if (distfile->distinfo->size == st.st_size) {
-				char buf[SHA256_DIGEST_STRING_LENGTH];
-				char *checksum = SHA256File(distfile->name, buf);
-				if (checksum && strcmp(checksum, distfile->distinfo->checksum) == 0) {
+			if (makevar("DISABLE_SIZE") || distfile->distinfo->size == st.st_size) {
+				if (makevar("NO_CHECKSUM")) {
 					distfile->fetched = true;
-					fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "sha256", distfile->name);
 				} else {
-					distfile->fetched = false;
-					fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", distfile->name);
-					fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", "checksum mismatch");
-					fprintf(stdout, "%8s%s\n", "", "Refetching...");
-					unlink(distfile->name);
+					char buf[SHA256_DIGEST_STRING_LENGTH];
+					char *checksum = SHA256File(distfile->name, buf);
+					if (checksum && strcmp(checksum, distfile->distinfo->checksum) == 0) {
+						distfile->fetched = true;
+						fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "sha256", distfile->name);
+					} else {
+						distfile->fetched = false;
+						fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", distfile->name);
+						fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", "checksum mismatch");
+						fprintf(stdout, "%8s%s\n", "", "Refetching...");
+						unlink(distfile->name);
+					}
 				}
 			} else {
 				distfile->fetched = false;

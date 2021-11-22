@@ -1,9 +1,10 @@
 .if !defined(PARFETCH)
-# Try to use /usr/ports/.bin/parfetch if it exists. Users can
+# Try to use /usr/ports/work/bin/parfetch if it exists. Users can
 # make it available to Poudriere by deploying it and enabling
 # this overlay without any further setup.
-.  if exists(${PORTSDIR}/.bin/parfetch})
-PARFETCH=	${PORTSDIR}/.bin/parfetch
+# /work is ignored by git via the ports tree .gitignore.
+.  if exists(${PORTSDIR}/work/bin/parfetch)
+PARFETCH=	${PORTSDIR}/work/bin/parfetch
 .  else
 PARFETCH=	parfetch
 .  endif
