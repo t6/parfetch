@@ -119,6 +119,11 @@ static void on_timeout(evutil_socket_t, short, void *);
 static int start_timeout(CURLM *, long, void *);
 static int handle_socket(CURL *, curl_socket_t, int, void *, void *);
 
+static const char *color_error = ANSI_COLOR_RED;
+static const char *color_info = ANSI_COLOR_BLUE;
+static const char *color_ok = ANSI_COLOR_GREEN;
+static const char *color_reset = ANSI_COLOR_RESET;
+
 const char *
 makevar(const char *var)
 {
@@ -305,8 +310,7 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 			}
 		}
 		curl_multi_add_handle(cm, eh);
-		fprintf(stdout, ANSI_COLOR_BLUE "%-8s" ANSI_COLOR_RESET "%s\n",
-			"queued", queue_entry->distfile->name);
+		fprintf(stdout, "%s%-8s%s%s\n", color_info, "queued", color_reset, queue_entry->distfile->name);
 		fprintf(stdout, "%8s%s\n", "", queue_entry->url);
 	}
 }
@@ -370,24 +374,24 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 	unlink(queue_entry->distfile->name);
 	queue_entry->distfile->fetched = false;
 
-	fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", queue_entry->distfile->name);
+	fprintf(stdout, "%s%-8s%s%s\n", color_error, "error", color_reset, queue_entry->distfile->name);
 	fprintf(stdout, "%8s%s\n", "", queue_entry->url);
 
 	switch (reason) {
 	case FETCH_DISTFILE_NEXT_MIRROR:
 		break;
 	case FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH:
-		fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", "checksum mismatch");
+		fprintf(stdout, "%8s%s%s%s\n", "", color_error, "checksum mismatch", color_reset);
 		break;
 	case FETCH_DISTFILE_NEXT_SIZE_MISMATCH:
-		fprintf(stdout, "%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n",
-			"", queue_entry->distfile->distinfo->size, queue_entry->size);
+		fprintf(stdout, "%8s%ssize mismatch (expected: %zu, actual: %zu)%s\n",
+			"", color_error, queue_entry->distfile->distinfo->size, queue_entry->size, color_reset);
 		break;
 	case FETCH_DISTFILE_NEXT_HTTP_ERROR:
 		break;
 	}
 	if (msg) {
-		fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", msg);
+		fprintf(stdout, "%8s%s%s%s\n", "", color_error, msg, color_reset);
 	}
 
 	// queue next mirror for file
@@ -415,7 +419,7 @@ check_multi_info(CURLM *cm)
 				if (makevar("DISABLE_SIZE") || queue_entry->size == queue_entry->distfile->distinfo->size) {
 					if (makevar("NO_CHECKSUM")) {
 						queue_entry->distfile->fetched = true;
-						fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+						fprintf(stdout, "%s%-8s%s%s\n", color_ok, "done", color_reset, queue_entry->distfile->name);
 					} else {
 						char digest[SHA256_DIGEST_STRING_LENGTH + 1];
 						char *checksum = SHA256End(&queue_entry->checksum_ctx, digest);
@@ -423,7 +427,7 @@ check_multi_info(CURLM *cm)
 							fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH, NULL);
 						} else {
 							queue_entry->distfile->fetched = true;
-							fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "done", queue_entry->distfile->name);
+							fprintf(stdout, "%s%-8s%s%s\n", color_ok, "done", color_reset, queue_entry->distfile->name);
 						}
 					}
 				} else unless (makevar("DISABLE_SIZE")) {
@@ -442,7 +446,7 @@ check_multi_info(CURLM *cm)
 			curl_easy_cleanup(message->easy_handle);
 			break;
 		} default:
-			fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%d\n", "error", message->msg);
+			fprintf(stdout, "%s%-8s%s%d\n", color_error, "error", color_reset, message->msg);
 		break;
 		}
 	}
@@ -528,6 +532,10 @@ main(int argc, char *argv[])
 {
 	struct Mempool *pool = mempool_new(); // XXX: pool might outlive main() via libcurl!
 
+	unless (can_use_colors(stdout)) {
+		color_error = color_info = color_ok = color_reset = "";
+	}
+
 	const char *distdir = makevar("DISTDIR");
 	unless (distdir) {
 		errx(1, "dp_DISTDIR not set in the environment");
@@ -601,26 +609,26 @@ main(int argc, char *argv[])
 					char *checksum = SHA256File(distfile->name, buf);
 					if (checksum && strcmp(checksum, distfile->distinfo->checksum) == 0) {
 						distfile->fetched = true;
-						fprintf(stdout, ANSI_COLOR_GREEN "%-8s" ANSI_COLOR_RESET "%s\n", "sha256", distfile->name);
+						fprintf(stdout, "%s%-8s%s%s\n", color_ok, "ok", color_reset, distfile->name);
 					} else {
 						distfile->fetched = false;
-						fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", distfile->name);
-						fprintf(stdout, "%8s" ANSI_COLOR_RED "%s" ANSI_COLOR_RESET "\n", "", "checksum mismatch");
+						fprintf(stdout, "%s%-8s%s%s\n", color_error, "error", color_reset, distfile->name);
+						fprintf(stdout, "%8s%s%s%s\n", "", color_error, "checksum mismatch", color_reset);
 						fprintf(stdout, "%8s%s\n", "", "Refetching...");
 						unlink(distfile->name);
 					}
 				}
 			} else {
 				distfile->fetched = false;
-				fprintf(stdout, ANSI_COLOR_RED "%-8s" ANSI_COLOR_RESET "%s\n", "error", distfile->name);
-				fprintf(stdout, "%8s" ANSI_COLOR_RED "size mismatch (expected: %zu, actual: %zu)" ANSI_COLOR_RESET "\n",
-					"", distfile->distinfo->size, st.st_size);
+				fprintf(stdout, "%s%-8s%s%s\n", color_error, "error", color_reset, distfile->name);
+				fprintf(stdout, "%8s%ssize mismatch (expected: %zu, actual: %zu)%s\n",
+					"", color_error, distfile->distinfo->size, st.st_size, color_reset);
 				fprintf(stdout, "%8s%s\n", "", "Refetching...");
 				unlink(distfile->name);
 			}
 		} else {
 			distfile->fetched = false;
-			fprintf(stdout, ANSI_COLOR_BLUE "%-8s" ANSI_COLOR_RESET "%s\n", "missing", distfile->name);
+			fprintf(stdout, "%s%-8s%s%s\n", color_info, "missing", color_reset, distfile->name);
 		}
 	}
 
