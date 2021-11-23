@@ -1,0 +1,113 @@
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+:toc:
+:toc-placement!:
+
+= _Parfetch_
+
+Fetch FreeBSD ports with parallel connection support and
+connection pipelining.
+
+CAUTION: This is an experiment. Use at your own risk.
+
+This is a glue application between libcurl and the ports
+framework. libcurl does all the heavy lifting. It can be
+activated by enabling an overlay. It replaces the default
+`do-fetch` and `checksum` targets.
+
+A statically linked binary is available in the overlay to make it
+easy to use with Poudriere(-devel) as well.
+
+toc::[]
+
+== Why?
+
+The ports framework does not make use of modern features like
+HTTP pipelining. All `USES=cargo` ports fetch most distfiles from
+a single host (https://crates.io) so could benefit greatly from
+it. Ports with hundreds of distfiles call `fetch(1)` hundreds of
+times and will open hundreds of connections one after the other.
+
+As an example here is a basic time comparison for `devel/tokei`
+where instead of opening >150 connections to https://crates.io
+sequentially, it just opens 1 connection to it and can fetch all
+crates basically immediately.
+
+https://asciinema.org/a/ogjs0MiCNZxqwYy2xliHfYEaM[image:https://asciinema.org/a/ogjs0MiCNZxqwYy2xliHfYEaM.svg[asciinema]]
+
+Even ports like `x11-toolkits/wlroots` with only a handful of
+distfiles can benefit from it.
+
+=== Default `fetch`
+[source]
+----
+$ time make -C devel/tokei distclean checksum
+       43.86 real         3.52 user         5.04 sys
+$ time make -C x11-toolkits/wlroots distclean checksum
+       12.28 real         1.25 user         1.81 sys
+----
+
+=== _Parfetch_
+[source]
+----
+$ time make -C devel/tokei OVERLAYS=/usr/local/share/parfetch/overlay distclean checksum
+        3.24 real         1.24 user         1.22 sys
+$ time make -C x11-toolkits/wlroots OVERLAYS=/usr/local/share/parfetch/overlay distclean checksum
+        2.79 real         0.85 user         0.85 sys
+----
+
+== Configure _Parfetch_
+
+=== Build
+[source]
+$ ./configure && ninja
+
+=== Install
+[source]
+$ ninja install
+
+=== Local ports setup
+
+Enable the overlay in `/etc/make.conf`:
+[source]
+OVERLAYS+=	/usr/local/share/parfetch/overlay
+
+=== Poudriere setup
+
+WARNING: This requires a Poudriere version with overlay support.
+For example `poudriere-devel`.
+
+==== Enable
+
+Make the overlay available to Poudriere:
+[source]
+$ poudriere ports -c -p parfetch -m null -M /usr/local/share/parfetch/overlay
+
+==== Usage
+
+Build `devel/tokei` and use _Parfetch_ to fetch distfiles:
+[source]
+$ poudriere bulk -O parfetch devel/tokei
+
+=== _Parfetch_ options
+
+Options can be set in `make.conf`.
+
+==== PARFETCH_MAX_HOST_CONNECTIONS
+
+This sets the maximum number of simultaneous open connections to
+a single host.
+
+Default is 1.
+
+==== PARFETCH_MAX_TOTAL_CONNECTIONS
+
+This sets the global connection limit. _Parfetch_ will not use
+more than this number of connections.
+
+Default is 4.
