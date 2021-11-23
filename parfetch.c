@@ -547,15 +547,15 @@ main(int argc, char *argv[])
 		err(1, "chdir: %s", distdir);
 	}
 
-	long max_connects_per_host = 1;
+	long max_host_connections = 1;
 	long max_total_connections = 4;
 	{
-		const char *max_connects_per_host_env = makevar("PARFETCH_MAX_CONNECTS_PER_HOST");
-		if (max_connects_per_host_env && strcmp(max_connects_per_host_env, "") != 0) {
+		const char *max_host_connections_env = makevar("PARFETCH_MAX_HOST_CONNECTIONS");
+		if (max_host_connections_env && strcmp(max_host_connections_env , "") != 0) {
 			const char *errstr = NULL;
-			max_connects_per_host = strtonum(max_connects_per_host_env, 1, LONG_MAX, &errstr);
+			max_host_connections = strtonum(max_host_connections_env , 1, LONG_MAX, &errstr);
 			if (errstr) {
-				errx(1, "PARFETCH_MAX_CONNECTS_PER_HOST: %s", errstr);
+				errx(1, "PARFETCH_MAX_HOST_CONNECTIONS: %s", errstr);
 			}
 		}
 		const char *max_total_connections_env = makevar("PARFETCH_MAX_TOTAL_CONNECTIONS");
@@ -648,7 +648,8 @@ main(int argc, char *argv[])
 	curl_multi_setopt(cm, CURLMOPT_SOCKETDATA, this);
 	curl_multi_setopt(cm, CURLMOPT_TIMERFUNCTION, start_timeout);
 	curl_multi_setopt(cm, CURLMOPT_TIMERDATA, this);
-	curl_multi_setopt(cm, CURLMOPT_MAXCONNECTS, max_connects_per_host);
+	curl_multi_setopt(cm, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
+	curl_multi_setopt(cm, CURLMOPT_MAX_HOST_CONNECTIONS, max_host_connections);
 	curl_multi_setopt(cm, CURLMOPT_MAX_TOTAL_CONNECTIONS, max_total_connections);
 
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
