@@ -118,6 +118,7 @@ static void check_multi_info(CURLM *);
 static void on_timeout(evutil_socket_t, short, void *);
 static int start_timeout(CURLM *, long, void *);
 static int handle_socket(CURL *, curl_socket_t, int, void *, void *);
+static bool response_code_ok(long, long);
 
 static const char *color_error = ANSI_COLOR_RED;
 static const char *color_info = ANSI_COLOR_BLUE;
@@ -399,6 +400,29 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 	fetch_distfile(cm, queue_entry->distfile->queue);
 }
 
+bool
+response_code_ok(long code, long protocol)
+{
+	switch (protocol) {
+	case CURLPROTO_FTP:
+	case CURLPROTO_FTPS:
+		if (code == 226) {
+			return true;
+		}
+		break;
+	case CURLPROTO_HTTP:
+	case CURLPROTO_HTTPS:
+		if (code == 200) {
+			return true;
+		}
+		break;
+	default:
+		err(1, "unsupported protocol: %ld\n", protocol);
+	}
+
+	return false;
+}
+
 void
 check_multi_info(CURLM *cm)
 {
@@ -414,8 +438,10 @@ check_multi_info(CURLM *cm)
 				queue_entry->distfile->fh = NULL;
 			}
 			long response_code = 0;
+			long protocol = 0;
 			curl_easy_getinfo(message->easy_handle, CURLINFO_RESPONSE_CODE, &response_code);
-			if (response_code == 200 && message->data.result == CURLE_OK) { // no error
+			curl_easy_getinfo(message->easy_handle, CURLINFO_PROTOCOL, &protocol);
+			if (response_code_ok(response_code, protocol) && message->data.result == CURLE_OK) { // no error
 				if (makevar("DISABLE_SIZE") || queue_entry->size == queue_entry->distfile->distinfo->size) {
 					if (makevar("NO_CHECKSUM")) {
 						queue_entry->distfile->fetched = true;
@@ -436,7 +462,7 @@ check_multi_info(CURLM *cm)
 			} else { // error
 				if (response_code > 0) {
 					SCOPE_MEMPOOL(pool);
-					const char *msg = str_printf(pool, "%ld", response_code);
+					const char *msg = str_printf(pool, "status %ld", response_code);
 					fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_HTTP_ERROR, msg);
 				} else {
 					fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_MIRROR, curl_easy_strerror(message->data.result));
