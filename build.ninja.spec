@@ -6,6 +6,7 @@ bundle libias.a
 	libias/compats.c
 	libias/flow.c
 	libias/io.c
+	libias/io/mkdirp.c
 	libias/map.c
 	libias/mem.c
 	libias/mempool.c
@@ -19,7 +20,6 @@ bundle libias.a
 bundle libparfetch.a
 	CFLAGS += `pkg-config --cflags libcurl libevent`
 	parfetch.c
-	mkdirs.c
 
 bin parfetch
 	LDADD += `pkg-config --libs libcurl libevent`

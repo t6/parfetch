@@ -55,10 +55,6 @@
 #include <libias/set.h>
 #include <libias/str.h>
 
-#include "mkdirs.h"
-
-#define MAX_PARALLEL 3 /* number of simultaneous transfers */
-
 enum FetchDistfileNextReason {
 	FETCH_DISTFILE_NEXT_MIRROR,
 	FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH,
@@ -278,8 +274,8 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 		{
 			SCOPE_MEMPOOL(pool);
 			char *dir = dirname(str_dup(pool, queue_entry->filename));
-			unless (mkdirs(dir)) {
-				err(1, "mkdir: %s", dir);
+			unless (mkdirp(dir)) {
+				err(1, "mkdirp: %s", dir);
 			}
 		}
 		queue_entry->distfile->fh = fopen(queue_entry->filename, "wb");
@@ -522,6 +518,9 @@ main(int argc, char *argv[])
 	const char *distdir = makevar("DISTDIR");
 	unless (distdir) {
 		errx(1, "dp_DISTDIR not set in the environment");
+	}
+	unless (mkdirp(distdir)) {
+		err(1, "mkdirp: %s", distdir);
 	}
 	if (chdir(distdir) == -1) {
 		err(1, "chdir: %s", distdir);
