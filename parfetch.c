@@ -291,6 +291,19 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 		unless (makevar("DISABLE_SIZE")) {
 			curl_easy_setopt(eh, CURLOPT_MAXFILESIZE_LARGE, queue_entry->distfile->distinfo->size);
 		}
+		const char *fetch_env = makevar("FETCH_ENV");
+		if (fetch_env) {
+			SCOPE_MEMPOOL(pool);
+			ARRAY_FOREACH(str_split(pool, fetch_env, ""), const char *, value) {
+				if (strcmp(value, "SSL_NO_VERIFY_PEER=1") != 0) {
+					curl_easy_setopt(eh, CURLOPT_SSL_VERIFYPEER, 0L);
+				} else if (strcmp(value, "SSL_NO_VERIFY_HOSTNAME=1") != 0) {
+					curl_easy_setopt(eh, CURLOPT_SSL_VERIFYHOST, 0L);
+				} else {
+					warnx("unhandled value in FETCH_ENV: %s", value);
+				}
+			}
+		}
 		curl_multi_add_handle(cm, eh);
 		fprintf(stdout, ANSI_COLOR_BLUE "%-8s" ANSI_COLOR_RESET "%s\n",
 			"queued", queue_entry->distfile->name);
