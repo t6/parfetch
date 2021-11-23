@@ -111,6 +111,7 @@ static bool check_checksum(struct Distfile *, SHA2_CTX *);
 static void prepare_distfile_queues(struct Mempool *, struct Array *);
 static void fetch_distfile(CURLM *, struct Queue *);
 static void fetch_distfile_next_mirror(struct DistfileQueueEntry *, CURLM *, enum FetchDistfileNextReason, const char *);
+static size_t fetch_distfile_progress_cb(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
 static size_t fetch_distfile_write_cb(char *, size_t, size_t, void *);
 static struct CurlContext *curl_context_new(curl_socket_t, struct CurlData *);
 static void curl_context_free(struct CurlContext *);
@@ -314,6 +315,9 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 		curl_easy_setopt(eh, CURLOPT_FOLLOWLOCATION, 1L);
 		curl_easy_setopt(eh, CURLOPT_WRITEFUNCTION, fetch_distfile_write_cb);
 		curl_easy_setopt(eh, CURLOPT_WRITEDATA, queue_entry);
+		curl_easy_setopt(eh, CURLOPT_NOPROGRESS, 0L);
+		curl_easy_setopt(eh, CURLOPT_XFERINFOFUNCTION, fetch_distfile_progress_cb);
+		curl_easy_setopt(eh, CURLOPT_XFERINFODATA, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_PRIVATE, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_URL, queue_entry->url);
 		if (makevar("DISABLE_SIZE")) {
@@ -337,6 +341,34 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 		curl_multi_add_handle(cm, eh);
 		fprintf(stdout, "%s%-8s%s%s\n", color_info, "queued", color_reset, queue_entry->url);
 	}
+}
+
+size_t
+fetch_distfile_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
+{
+	// We show something every ~2s. This isn't meant to be
+	// comprehensive or show progress for all files. It's
+	// important to show progress for longer downloads.
+	static time_t last_progress = 0;
+	if (strcmp(color_reset, "") == 0) {
+		// stdout is not a tty
+		return 0;
+	}
+	struct DistfileQueueEntry *queue_entry = userdata;
+	time_t t = time(NULL);
+	if (last_progress < t && (t - last_progress) > 2) {
+		last_progress = t;
+		int percent;
+		if (dltotal == 0 || (dltotal == dlnow && queue_entry->size == 0)) {
+			percent = 0;
+		} else {
+			percent = (100 * dlnow) / dltotal;
+		}
+		if (percent > 0 && percent < 100) {
+			fprintf(stdout, "%2d %%    %s\n", percent, queue_entry->distfile->name);
+		}
+	}
+	return 0;
 }
 
 size_t
