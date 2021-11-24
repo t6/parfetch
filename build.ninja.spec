@@ -19,6 +19,7 @@ bundle libias.a
 
 bundle libparfetch.a
 	CFLAGS += `pkg-config --cflags libcurl libevent`
+	loop.c
 	parfetch.c
 
 bin parfetch

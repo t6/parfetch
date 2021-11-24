@@ -1,1 +1,1 @@
-set global makecmd "ninja && cp _build/.bin/parfetch-static overlay/bin/parfetch-static"
+set global makecmd "ninja"
