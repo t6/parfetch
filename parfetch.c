@@ -479,7 +479,7 @@ response_code_ok(long code, long protocol)
 		}
 		break;
 	default:
-		err(1, "unsupported protocol: %ld\n", protocol);
+		errx(1, "unsupported protocol: %ld", protocol);
 	}
 
 	return false;
@@ -500,9 +500,13 @@ check_multi_info(CURLM *cm)
 				queue_entry->distfile->fh = NULL;
 			}
 			long response_code = 0;
+			if (CURLE_OK != curl_easy_getinfo(message->easy_handle, CURLINFO_RESPONSE_CODE, &response_code) || response_code == 0) {
+				goto general_curl_error;
+			}
 			long protocol = 0;
-			curl_easy_getinfo(message->easy_handle, CURLINFO_RESPONSE_CODE, &response_code);
-			curl_easy_getinfo(message->easy_handle, CURLINFO_PROTOCOL, &protocol);
+			if (CURLE_OK != curl_easy_getinfo(message->easy_handle, CURLINFO_PROTOCOL, &protocol) || protocol == 0) {
+				goto general_curl_error;
+			}
 			if (response_code_ok(response_code, protocol) && message->data.result == CURLE_OK) { // no error
 				if (makevar("DISABLE_SIZE")) {
 					if (check_checksum(queue_entry->distfile, &queue_entry->checksum_ctx)) {
@@ -532,6 +536,7 @@ check_multi_info(CURLM *cm)
 				const char *msg = str_printf(pool, "status %ld", response_code);
 				fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_HTTP_ERROR, msg);
 			} else { // general curl error
+general_curl_error:
 				fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_MIRROR, curl_easy_strerror(message->data.result));
 			}
 			curl_multi_remove_handle(cm, message->easy_handle);
