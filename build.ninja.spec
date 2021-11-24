@@ -1,4 +1,5 @@
 CSTD = gnu99
+LDADD += $LDADD_EXECINFO $LDADD_SHA2
 
 bundle libias.a
 	subdir = $srcdir/libias
