@@ -1,4 +1,4 @@
-CFLAGS += -O0
+CSTD = gnu99
 
 bundle libias.a
 	subdir = $srcdir/libias
