@@ -1,4 +1,4 @@
-.if !defined(_INCLUDE_PARFETCH_OVERLAY) && !defined(DISABLE_PARFETCH) && \
+.if !defined(_INCLUDE_PARFETCH_OVERLAY) && !defined(NO_PARFETCH) && \
 	!make(fetch-list) && !make(fetch-url-list-int) && \
 	!make(fetch-urlall-list) && !make(fetch-url-list)
 _INCLUDE_PARFETCH_OVERLAY=	yes
