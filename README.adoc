@@ -38,7 +38,7 @@ where instead of opening >150 connections to https://crates.io
 sequentially, it just opens 1 connection to it and can fetch all
 crates basically immediately.
 
-https://asciinema.org/a/ogjs0MiCNZxqwYy2xliHfYEaM[image:https://asciinema.org/a/ogjs0MiCNZxqwYy2xliHfYEaM.svg[asciinema]]
+https://asciinema.org/a/ogjs0MiCNZxqwYy2xliHfYEaM[image:https://asciinema.org/a/ogjs0MiCNZxqwYy2xliHfYEaM.png[asciinema]]
 
 Even ports like `x11-toolkits/wlroots` with only a handful of
 distfiles can benefit from it.
