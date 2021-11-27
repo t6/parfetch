@@ -5,6 +5,7 @@ bundle libias.a
 	subdir = $srcdir/libias
 	libias/array.c
 	libias/compats.c
+	libias/distinfo.c
 	libias/flow.c
 	libias/io.c
 	libias/io/mkdirp.c
@@ -12,10 +13,13 @@ bundle libias.a
 	libias/mem.c
 	libias/mempool.c
 	libias/mempool/file.c
+	libias/peg.c
+	libias/peg/distinfo.c
 	libias/queue.c
 	libias/set.c
 	libias/stack.c
 	libias/str.c
+	libias/utf8.c
 	libias/util.c
 
 bundle libparfetch.a

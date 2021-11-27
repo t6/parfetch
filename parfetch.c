@@ -46,6 +46,7 @@
 #include <event2/event.h>
 #include <libias/array.h>
 #include <libias/color.h>
+#include <libias/distinfo.h>
 #include <libias/flow.h>
 #include <libias/io.h>
 #include <libias/map.h>
@@ -69,12 +70,6 @@ enum SitesType {
 	PATCH_SITES,
 };
 
-struct DistinfoEntry {
-	const char *name;
-	const char *checksum;
-	curl_off_t size;
-};
-
 struct Distfile {
 	enum SitesType sites_type;
 	const char *name;
@@ -95,8 +90,8 @@ struct DistfileQueueEntry {
 
 // Prototypes
 static const char *makevar(const char *);
-static struct Distfile *parse_distfile_arg(struct Mempool *, struct Map *, enum SitesType, const char *);
-static struct Map *load_distinfo(struct Mempool *);
+static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, enum SitesType, const char *);
+static struct Distinfo *load_distinfo(struct Mempool *);
 static bool check_checksum(struct Distfile *, SHA2_CTX *);
 static void prepare_distfile_queues(struct Mempool *, struct Array *);
 static void fetch_distfile(CURLM *, struct Queue *);
@@ -126,7 +121,7 @@ makevar(const char *var)
 }
 
 struct Distfile *
-parse_distfile_arg(struct Mempool *pool, struct Map *distinfo, enum SitesType sites_type, const char *arg)
+parse_distfile_arg(struct Mempool *pool, struct Distinfo *distinfo, enum SitesType sites_type, const char *arg)
 {
 	struct Distfile *distfile = mempool_alloc(pool, sizeof(struct Distfile));
 	distfile->sites_type = sites_type;
@@ -150,7 +145,7 @@ parse_distfile_arg(struct Mempool *pool, struct Map *distinfo, enum SitesType si
 		} else {
 			fullname = distfile->name;
 		}
-		distfile->distinfo = map_get(distinfo, fullname);
+		distfile->distinfo = distinfo_entry(distinfo, fullname);
 		unless (distfile->distinfo) {
 			if (!makevar("NO_CHECKSUM") && !makevar("DISABLE_SIZE")) {
 				errx(1, "missing distinfo entry for %s", fullname);
@@ -161,7 +156,7 @@ parse_distfile_arg(struct Mempool *pool, struct Map *distinfo, enum SitesType si
 	return distfile;
 }
 
-struct Map *
+struct Distinfo *
 load_distinfo(struct Mempool *extpool)
 {
 	SCOPE_MEMPOOL(pool);
@@ -171,53 +166,24 @@ load_distinfo(struct Mempool *extpool)
 		errx(1, "dp_DISTINFO_FILE not set in the environment");
 	}
 
-	struct Map *distinfo = mempool_map(extpool, str_compare, NULL);
 	FILE *f = mempool_fopenat(pool, AT_FDCWD, distinfo_file, "r", 0);
 	unless (f) {
 		if (makevar("NO_CHECKSUM") && makevar("DISABLE_SIZE")) {
-			return distinfo;
+			return NULL;
 		} else {
 			err(1, "could not open %s", distinfo_file);
 		}
 	}
 
-	LINE_FOREACH(f, line) {
-		struct Array *fields = str_split(pool, line, " ");
-		if (array_len(fields) != 4) {
-			continue;
+	struct Array *errors = NULL;
+	struct Distinfo *distinfo = distinfo_parse(f, pool, &errors);
+	unless (distinfo) {
+		warnx("could not parse %s", distinfo_file);
+		ARRAY_FOREACH(errors, const char *, line) {
+			fprintf(stderr, "%s:%s\n", distinfo_file, line);
 		}
-		char *file = NULL;
-		const char *checksum = NULL;
-		const char *size = NULL;
-		if (strcmp(array_get(fields, 0), "SHA256") == 0) {
-			file = array_get(fields, 1);
-			file++;
-			file[strlen(file) - 1] = 0;
-			checksum = array_get(fields, 3);
-		} else if (strcmp(array_get(fields, 0), "SIZE") == 0) {
-			file = array_get(fields, 1);
-			file++;
-			file[strlen(file) - 1] = 0;
-			size = array_get(fields, 3);
-		}
-
-		struct DistinfoEntry *entry = map_get(distinfo, file);
-		unless (entry) {
-			entry = mempool_alloc(extpool, sizeof(struct DistinfoEntry));
-			entry->name = str_dup(extpool, file);
-			map_add(distinfo, entry->name, entry);
-		}
-		if (checksum) {
-			entry->checksum = str_dup(extpool, checksum);
-		} else if (size) {
-			const char *errstr = NULL;
-			entry->size = strtonum(size, 1, INT64_MAX, &errstr);
-			if (errstr) {
-				errx(1, "size for %s: %s", entry->name, errstr);
-			}
-		}
+		exit(1);
 	}
-
 	return distinfo;
 }
 
@@ -234,7 +200,7 @@ check_checksum(struct Distfile *distfile, SHA2_CTX *ctx)
 		} else {
 			checksum = SHA256File(distfile->name, digest);
 		}
-		return !(checksum && strcmp(checksum, distfile->distinfo->checksum) != 0);
+		return !(checksum && strcmp(checksum, distfile->distinfo->digest) != 0);
 	} else {
 		err(1, "NO_CHECKSUM not set but distinfo not loaded");
 	}
@@ -543,7 +509,7 @@ main(int argc, char *argv[])
 		}
 	}
 
-	struct Map *distinfo = load_distinfo(pool);
+	struct Distinfo *distinfo = load_distinfo(pool);
 	struct Array *distfiles = mempool_array(pool);
 	int ch;
 	while ((ch = getopt(argc, argv, "d:p:")) != -1) {
