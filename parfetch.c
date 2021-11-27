@@ -252,11 +252,17 @@ prepare_distfile_queues(struct Mempool *pool, struct Array *distfiles)
 		ARRAY_FOREACH(distfile->groups, const char *, group) {
 			struct Array *sites = map_get(groupsites[distfile->sites_type], group);
 			unless (sites) {
+				sites = mempool_array(pool);
+				// Prepend MASTER_SITE_OVERRIDE if it is set
+				const char *master_site_override = makevar("MASTER_SITE_OVERRIDE");
+				if (master_site_override) {
+					array_append(sites, str_dup(pool, master_site_override));
+				}
 				const char *sitesenv = getenv(str_printf(pool, "%s%s", env_prefix[distfile->sites_type], group));
 				if (sitesenv == NULL) {
 					errx(1, "cannot find %s%s for %s group", env_prefix[distfile->sites_type], group, group);
 				}
-				sites = str_split(pool, str_dup(pool, sitesenv), " ");
+				ARRAY_JOIN(sites, str_split(pool, str_dup(pool, sitesenv), " "))
 				const char *master_site_backup = makevar("MASTER_SITE_BACKUP");
 				if (master_site_backup) {
 					ARRAY_JOIN(sites, str_split(pool, str_dup(pool, master_site_backup), " "));
