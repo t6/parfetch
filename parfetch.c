@@ -200,7 +200,7 @@ check_checksum(struct Distfile *distfile, SHA2_CTX *ctx)
 		} else {
 			checksum = SHA256File(distfile->name, digest);
 		}
-		return !(checksum && strcmp(checksum, distfile->distinfo->digest) != 0);
+		return !(checksum && strcasecmp(checksum, distfile->distinfo->digest) != 0);
 	} else {
 		err(1, "NO_CHECKSUM not set but distinfo not loaded");
 	}
