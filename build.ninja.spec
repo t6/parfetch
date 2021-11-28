@@ -5,6 +5,7 @@ bundle libias.a
 	subdir = $srcdir/libias
 	libias/array.c
 	libias/compats.c
+	libias/diff.c
 	libias/distinfo.c
 	libias/flow.c
 	libias/io.c

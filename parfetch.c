@@ -613,6 +613,22 @@ main(int argc, char *argv[])
 
 	prepare_distfile_queues(pool, distinfo, distfiles);
 
+	if (opts.makesum) {
+		// Remove old entries in distinfo that we do not have in DISTFILES
+		ARRAY_FOREACH(distinfo_entries(distinfo, pool), struct DistinfoEntry *, entry) {
+			bool found = false;
+			ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
+				if (strcmp(entry->filename, distfile->name) == 0) {
+					found = true;
+					break;
+				}
+			}
+			unless (found) {
+				distinfo_remove_entry(distinfo, entry->filename);
+			}
+		}
+	}
+
 	// Check file existence and checksums if requested
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
 		struct stat st;
