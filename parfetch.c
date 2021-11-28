@@ -71,6 +71,7 @@ enum SitesType {
 };
 
 struct Distfile {
+	struct Mempool *pool;
 	enum SitesType sites_type;
 	const char *name;
 	bool fetched;
@@ -124,6 +125,7 @@ struct Distfile *
 parse_distfile_arg(struct Mempool *pool, struct Distinfo *distinfo, enum SitesType sites_type, const char *arg)
 {
 	struct Distfile *distfile = mempool_alloc(pool, sizeof(struct Distfile));
+	distfile->pool = pool;
 	distfile->sites_type = sites_type;
 	distfile->queue = mempool_queue(pool);
 	distfile->name = str_dup(pool, arg);
@@ -146,6 +148,12 @@ parse_distfile_arg(struct Mempool *pool, struct Distinfo *distinfo, enum SitesTy
 			fullname = distfile->name;
 		}
 		distfile->distinfo = distinfo_entry(distinfo, fullname);
+		if (!distfile->distinfo && makevar("_PARFETCH_MAKESUM")) {
+			distinfo_add_entry(distinfo, &(struct DistinfoEntry){
+				.filename = fullname,
+			});
+			distfile->distinfo = distinfo_entry(distinfo, fullname);
+		}
 		unless (distfile->distinfo) {
 			if (!makevar("NO_CHECKSUM") && !makevar("DISABLE_SIZE")) {
 				errx(1, "missing distinfo entry for %s", fullname);
@@ -168,7 +176,11 @@ load_distinfo(struct Mempool *extpool)
 
 	FILE *f = mempool_fopenat(pool, AT_FDCWD, distinfo_file, "r", 0);
 	unless (f) {
-		if (makevar("NO_CHECKSUM") && makevar("DISABLE_SIZE")) {
+		if (makevar("_PARFETCH_MAKESUM")) {
+			struct Distinfo *distinfo = distinfo_new();
+			distinfo_set_timestamp(distinfo, time(NULL));
+			return distinfo;
+		} else if (makevar("NO_CHECKSUM") && makevar("DISABLE_SIZE")) {
 			return NULL;
 		} else {
 			err(1, "could not open %s", distinfo_file);
@@ -190,7 +202,7 @@ load_distinfo(struct Mempool *extpool)
 bool
 check_checksum(struct Distfile *distfile, SHA2_CTX *ctx)
 {
-	if (makevar("NO_CHECKSUM")) {
+	if (makevar("NO_CHECKSUM") && !makevar("_PARFETCH_MAKESUM")) {
 		return true;
 	} else if (distfile->distinfo) {
 		char digest[SHA256_DIGEST_STRING_LENGTH + 1];
@@ -200,9 +212,17 @@ check_checksum(struct Distfile *distfile, SHA2_CTX *ctx)
 		} else {
 			checksum = SHA256File(distfile->name, digest);
 		}
-		return !(checksum && strcasecmp(checksum, distfile->distinfo->digest) != 0);
+		if (makevar("_PARFETCH_MAKESUM")) {
+			unless (checksum) {
+				errx(1, "could not checksum %s", distfile->name);
+			}
+			distfile->distinfo->digest = str_dup(distfile->pool, checksum);
+			return true;
+		} else {
+			return !(checksum && strcasecmp(checksum, distfile->distinfo->digest) != 0);
+		}
 	} else {
-		err(1, "NO_CHECKSUM not set but distinfo not loaded");
+		errx(1, "NO_CHECKSUM not set but distinfo not loaded");
 	}
 }
 
@@ -428,6 +448,9 @@ check_multi_info(CURLM *cm)
 			}
 			if (response_code_ok(response_code, protocol) && message->data.result == CURLE_OK) { // no error
 				if (makevar("DISABLE_SIZE")) {
+					if (makevar("_PARFETCH_MAKESUM")) {
+						queue_entry->distfile->distinfo->size = queue_entry->size;
+					}
 					if (check_checksum(queue_entry->distfile, &queue_entry->checksum_ctx)) {
 						queue_entry->distfile->fetched = true;
 						fprintf(stdout, "%s%-8s%s%s\n", color_ok, "done", color_reset, queue_entry->distfile->name);
@@ -542,7 +565,16 @@ main(int argc, char *argv[])
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
 		struct stat st;
 		if (stat(distfile->name, &st) >= 0) {
-			if (makevar("DISABLE_SIZE")) {
+			if (makevar("_PARFETCH_MAKESUM")) {
+				distfile->fetched = true;
+				if (check_checksum(distfile, NULL)) {
+					distfile->fetched = true;
+					distfile->distinfo->size = st.st_size;
+					fprintf(stdout, "%s%-8s%s%s\n", color_ok, "ok", color_reset, distfile->name);
+				} else {
+					panic("check_checksum() returned with failure in makesum mode");
+				}
+			} else if (makevar("DISABLE_SIZE")) {
 				if (makevar("NO_CHECKSUM")) {
 					distfile->fetched = true;
 				} else if (check_checksum(distfile, NULL)) {
@@ -606,6 +638,19 @@ main(int argc, char *argv[])
 		all_fetched = all_fetched && distfile->fetched;
 	}
 	if (all_fetched) {
+		if (makevar("_PARFETCH_MAKESUM")) {
+			SCOPE_MEMPOOL(pool);
+			const char *distinfo_file = makevar("DISTINFO_FILE");
+			unless (distinfo_file) {
+				errx(1, "dp_DISTINFO_FILE not set in the environment");
+			}
+			FILE *f = mempool_fopenat(pool, AT_FDCWD, distinfo_file, "w", 0644);
+			unless (f) {
+				err(1, "could not open %s", distinfo_file);
+			}
+			distinfo_serialize(distinfo, f);
+			fprintf(stdout, "%s%-8s%s%s\n", color_info, "updated", color_reset, distinfo_file);
+		}
 		return 0;
 	} else {
 		errx(1, "could not fetch all distfiles");
