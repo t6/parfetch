@@ -1,3 +1,24 @@
+# The following options are supported:
+#
+# PARFETCH_MAKESUM_EPHEMERAL
+# When defined during makesum, distinfo is created/updated but
+# no distfiles are saved to disk. Note that the files are still
+# downloaded completely to checksum them but DISTDIR is left
+# untouched.
+#
+# PARFETCH_MAKESUM_KEEP_TIMESTAMP
+# When defined during makesum, retain the previous TIMESTAMP in
+# distinfo. This can be useful when refreshing patches that have
+# no code changes and thus do not warrant a TIMESTAMP bump.
+#
+# PARFETCH_MAX_HOST_CONNECTIONS
+# Sets the per host connection limit. Also see
+# CURLMOPT_MAX_HOST_CONNECTIONS(3).
+#
+# PARFETCH_MAX_TOTAL_CONNECTIONS
+# Sets the global connection limit. Also see
+# CURLMOPT_MAX_TOTAL_CONNECTIONS(3).
+#
 .if !defined(_INCLUDE_PARFETCH_OVERLAY) && !defined(NO_PARFETCH) && \
 	!make(fetch-list) && !make(fetch-url-list-int) && \
 	!make(fetch-urlall-list) && !make(fetch-url-list)
@@ -18,9 +39,7 @@ PARFETCH?=	${odir}/bin/parfetch-static
 PARFETCH?=	parfetch
 .endif
 
-# Per host connection limit (see CURLMOPT_MAX_HOST_CONNECTIONS(3))
 PARFETCH_MAX_HOST_CONNECTIONS?=		1
-# Global connection limit (see CURLMOPT_MAX_TOTAL_CONNECTIONS(3))
 PARFETCH_MAX_TOTAL_CONNECTIONS?=	4
 
 _PARFETCH_ENV=	${_DO_FETCH_ENV} \
