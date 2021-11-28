@@ -13,6 +13,9 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
 * Support `MASTER_SITE_OVERRIDE` and `MASTER_SITE_FREEBSD`
 * Subsume `makesum` as well to make use of on-the-fly
   checksumming too and to skip the sha256(1) calls afterwards.
+* When `PARFETCH_MAKESUM_KEEP_TIMESTAMP` is defined `makesum`
+  will not update `TIMESTAMP` in `distinfo`. This can be useful
+  when refreshing patches with no code changes.
 
 == [a20211126] - 2021-11-26
 

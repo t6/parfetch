@@ -89,6 +89,7 @@ struct ParfetchOptions {
 	bool disable_size;
 	bool no_checksum;
 	bool makesum;
+	bool makesum_keep_timestamp;
 	bool want_colors;
 };
 
@@ -175,6 +176,7 @@ parfetch_init_options()
 	opts.dist_subdir = makevar("DIST_SUBDIR");
 
 	opts.makesum = makevar("_PARFETCH_MAKESUM");
+	opts.makesum_keep_timestamp = makevar("PARFETCH_MAKESUM_KEEP_TIMESTAMP");
 	opts.disable_size = makevar("DISABLE_SIZE");
 	opts.no_checksum = makevar("NO_CHECKSUM");
 
@@ -226,7 +228,9 @@ parse_distfile_arg(struct Mempool *pool, struct Distinfo *distinfo, enum SitesTy
 		distfile->distinfo = distinfo_entry(distinfo, fullname);
 		if (!distfile->distinfo && opts.makesum) {
 			// We add a new entry so update the timestamp
-			distinfo_set_timestamp(distinfo, time(NULL));
+			unless (opts.makesum_keep_timestamp) {
+				distinfo_set_timestamp(distinfo, time(NULL));
+			}
 			distinfo_add_entry(distinfo, &(struct DistinfoEntry){
 				.filename = fullname,
 			});
@@ -295,11 +299,15 @@ check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, SHA2_CTX *c
 			}
 			if (distfile->distinfo->digest) {
 				if (strcmp(distfile->distinfo->digest, checksum) != 0) {
-					distinfo_set_timestamp(distinfo, time(NULL));
+					unless (opts.makesum_keep_timestamp) {
+						distinfo_set_timestamp(distinfo, time(NULL));
+					}
 					distfile->distinfo->digest = str_dup(distfile->pool, checksum);
 				}
 			} else {
-				distinfo_set_timestamp(distinfo, time(NULL));
+				unless (opts.makesum_keep_timestamp) {
+					distinfo_set_timestamp(distinfo, time(NULL));
+				}
 				distfile->distinfo->digest = str_dup(distfile->pool, checksum);
 			}
 			return true;
@@ -535,7 +543,9 @@ check_multi_info(CURLM *cm)
 			if (response_code_ok(response_code, protocol) && message->data.result == CURLE_OK) { // no error
 				if (opts.disable_size) {
 					if (opts.makesum && queue_entry->distfile->distinfo->size != queue_entry->size) {
-						distinfo_set_timestamp(queue_entry->distinfo, time(NULL));
+						unless (opts.makesum_keep_timestamp) {
+							distinfo_set_timestamp(queue_entry->distinfo, time(NULL));
+						}
 						queue_entry->distfile->distinfo->size = queue_entry->size;
 					}
 					if (check_checksum(queue_entry->distinfo, queue_entry->distfile, &queue_entry->checksum_ctx)) {
@@ -638,7 +648,9 @@ main(int argc, char *argv[])
 				if (check_checksum(distinfo, distfile, NULL)) {
 					distfile->fetched = true;
 					if (distfile->distinfo->size != st.st_size) {
-						distinfo_set_timestamp(distinfo, time(NULL));
+						unless (opts.makesum_keep_timestamp) {
+							distinfo_set_timestamp(distinfo, time(NULL));
+						}
 						distfile->distinfo->size = st.st_size;
 					}
 					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, distfile->name);
