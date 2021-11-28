@@ -634,22 +634,6 @@ main(int argc, char *argv[])
 
 	prepare_distfile_queues(pool, distinfo, distfiles);
 
-	if (opts.makesum) {
-		// Remove old entries in distinfo that we do not have in DISTFILES
-		ARRAY_FOREACH(distinfo_entries(distinfo, pool), struct DistinfoEntry *, entry) {
-			bool found = false;
-			ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
-				if (strcmp(entry->filename, distfile->name) == 0) {
-					found = true;
-					break;
-				}
-			}
-			unless (found) {
-				distinfo_remove_entry(distinfo, entry->filename);
-			}
-		}
-	}
-
 	// Check file existence and checksums if requested
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
 		struct stat st;
@@ -732,18 +716,17 @@ main(int argc, char *argv[])
 		all_fetched = all_fetched && distfile->fetched;
 	}
 	if (all_fetched) {
-		if (makevar("_PARFETCH_MAKESUM")) {
+		if (opts.makesum) {
 			SCOPE_MEMPOOL(pool);
-			const char *distinfo_file = makevar("DISTINFO_FILE");
-			unless (distinfo_file) {
-				errx(1, "dp_DISTINFO_FILE not set in the environment");
-			}
-			FILE *f = mempool_fopenat(pool, AT_FDCWD, distinfo_file, "w", 0644);
+			FILE *f = mempool_fopenat(pool, AT_FDCWD, opts.distinfo_file, "w", 0644);
 			unless (f) {
-				err(1, "could not open %s", distinfo_file);
+				err(1, "could not open %s", opts.distinfo_file);
 			}
-			distinfo_serialize(distinfo, f);
-			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_info, "updated", opts.color_reset, distinfo_file);
+			fprintf(f, "TIMESTAMP = %ju\n", (uintmax_t)distinfo_timestamp(distinfo));
+			ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
+				distinfo_entry_serialize(distfile->distinfo, f);
+			}
+			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_info, "updated", opts.color_reset, opts.distinfo_file);
 		}
 		return 0;
 	} else {
