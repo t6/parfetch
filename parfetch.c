@@ -82,6 +82,7 @@ struct Distfile {
 };
 
 struct DistfileQueueEntry {
+	struct Distinfo *distinfo;
 	struct Distfile *distfile;
 	const char *filename;
 	const char *url;
@@ -93,8 +94,8 @@ struct DistfileQueueEntry {
 static const char *makevar(const char *);
 static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, enum SitesType, const char *);
 static struct Distinfo *load_distinfo(struct Mempool *);
-static bool check_checksum(struct Distfile *, SHA2_CTX *);
-static void prepare_distfile_queues(struct Mempool *, struct Array *);
+static bool check_checksum(struct Distinfo *, struct Distfile *, SHA2_CTX *);
+static void prepare_distfile_queues(struct Mempool *, struct Distinfo *, struct Array *);
 static void fetch_distfile(CURLM *, struct Queue *);
 static void fetch_distfile_next_mirror(struct DistfileQueueEntry *, CURLM *, enum FetchDistfileNextReason, const char *);
 static size_t fetch_distfile_progress_cb(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
@@ -149,6 +150,8 @@ parse_distfile_arg(struct Mempool *pool, struct Distinfo *distinfo, enum SitesTy
 		}
 		distfile->distinfo = distinfo_entry(distinfo, fullname);
 		if (!distfile->distinfo && makevar("_PARFETCH_MAKESUM")) {
+			// We add a new entry so update the timestamp
+			distinfo_set_timestamp(distinfo, time(NULL));
 			distinfo_add_entry(distinfo, &(struct DistinfoEntry){
 				.filename = fullname,
 			});
@@ -196,11 +199,15 @@ load_distinfo(struct Mempool *extpool)
 		}
 		exit(1);
 	}
+	// Add a timestamp in case it is missing
+	if (distinfo_timestamp(distinfo) == 0) {
+		distinfo_set_timestamp(distinfo, time(NULL));
+	}
 	return distinfo;
 }
 
 bool
-check_checksum(struct Distfile *distfile, SHA2_CTX *ctx)
+check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, SHA2_CTX *ctx)
 {
 	if (makevar("NO_CHECKSUM") && !makevar("_PARFETCH_MAKESUM")) {
 		return true;
@@ -216,7 +223,15 @@ check_checksum(struct Distfile *distfile, SHA2_CTX *ctx)
 			unless (checksum) {
 				errx(1, "could not checksum %s", distfile->name);
 			}
-			distfile->distinfo->digest = str_dup(distfile->pool, checksum);
+			if (distfile->distinfo->digest) {
+				if (strcmp(distfile->distinfo->digest, checksum) != 0) {
+					distinfo_set_timestamp(distinfo, time(NULL));
+					distfile->distinfo->digest = str_dup(distfile->pool, checksum);
+				}
+			} else {
+				distinfo_set_timestamp(distinfo, time(NULL));
+				distfile->distinfo->digest = str_dup(distfile->pool, checksum);
+			}
 			return true;
 		} else {
 			return !(checksum && strcasecmp(checksum, distfile->distinfo->digest) != 0);
@@ -227,7 +242,7 @@ check_checksum(struct Distfile *distfile, SHA2_CTX *ctx)
 }
 
 void
-prepare_distfile_queues(struct Mempool *pool, struct Array *distfiles)
+prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct Array *distfiles)
 {
 	// collect MASTER_SITES / PATCH_SITES per group and create mirror queues
 	struct Map *groupsites[2];
@@ -258,6 +273,7 @@ prepare_distfile_queues(struct Mempool *pool, struct Array *distfiles)
 
 			ARRAY_FOREACH(sites, const char *, site) {
 				struct DistfileQueueEntry *e = mempool_alloc(pool, sizeof(struct DistfileQueueEntry));
+				e->distinfo = distinfo;
 				e->distfile = distfile;
 				e->filename = str_dup(pool, distfile->name);
 				e->url = str_printf(pool, "%s%s", site, distfile->name);
@@ -448,10 +464,12 @@ check_multi_info(CURLM *cm)
 			}
 			if (response_code_ok(response_code, protocol) && message->data.result == CURLE_OK) { // no error
 				if (makevar("DISABLE_SIZE")) {
-					if (makevar("_PARFETCH_MAKESUM")) {
+					if (makevar("_PARFETCH_MAKESUM") &&
+					    queue_entry->distfile->distinfo->size != queue_entry->size) {
+						distinfo_set_timestamp(queue_entry->distinfo, time(NULL));
 						queue_entry->distfile->distinfo->size = queue_entry->size;
 					}
-					if (check_checksum(queue_entry->distfile, &queue_entry->checksum_ctx)) {
+					if (check_checksum(queue_entry->distinfo, queue_entry->distfile, &queue_entry->checksum_ctx)) {
 						queue_entry->distfile->fetched = true;
 						fprintf(stdout, "%s%-8s%s%s\n", color_ok, "done", color_reset, queue_entry->distfile->name);
 					} else {
@@ -459,7 +477,7 @@ check_multi_info(CURLM *cm)
 					}
 				} else if (queue_entry->distfile->distinfo) {
 					if (queue_entry->size == queue_entry->distfile->distinfo->size) {
-						if (check_checksum(queue_entry->distfile, &queue_entry->checksum_ctx)) {
+						if (check_checksum(queue_entry->distinfo, queue_entry->distfile, &queue_entry->checksum_ctx)) {
 							queue_entry->distfile->fetched = true;
 							fprintf(stdout, "%s%-8s%s%s\n", color_ok, "done", color_reset, queue_entry->distfile->name);
 						} else {
@@ -559,7 +577,7 @@ main(int argc, char *argv[])
 		errx(1, "unsupported dp_TARGET value: %s", target);
 	}
 
-	prepare_distfile_queues(pool, distfiles);
+	prepare_distfile_queues(pool, distinfo, distfiles);
 
 	// Check file existence and checksums if requested
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
@@ -567,9 +585,12 @@ main(int argc, char *argv[])
 		if (stat(distfile->name, &st) >= 0) {
 			if (makevar("_PARFETCH_MAKESUM")) {
 				distfile->fetched = true;
-				if (check_checksum(distfile, NULL)) {
+				if (check_checksum(distinfo, distfile, NULL)) {
 					distfile->fetched = true;
-					distfile->distinfo->size = st.st_size;
+					if (distfile->distinfo->size != st.st_size) {
+						distinfo_set_timestamp(distinfo, time(NULL));
+						distfile->distinfo->size = st.st_size;
+					}
 					fprintf(stdout, "%s%-8s%s%s\n", color_ok, "ok", color_reset, distfile->name);
 				} else {
 					panic("check_checksum() returned with failure in makesum mode");
@@ -577,7 +598,7 @@ main(int argc, char *argv[])
 			} else if (makevar("DISABLE_SIZE")) {
 				if (makevar("NO_CHECKSUM")) {
 					distfile->fetched = true;
-				} else if (check_checksum(distfile, NULL)) {
+				} else if (check_checksum(distinfo, distfile, NULL)) {
 					distfile->fetched = true;
 					fprintf(stdout, "%s%-8s%s%s\n", color_ok, "ok", color_reset, distfile->name);
 				} else {
@@ -590,7 +611,7 @@ main(int argc, char *argv[])
 				if (distfile->distinfo->size == st.st_size) {
 					if (makevar("NO_CHECKSUM")) {
 						distfile->fetched = true;
-					} else if (check_checksum(distfile, NULL)) {
+					} else if (check_checksum(distinfo, distfile, NULL)) {
 						distfile->fetched = true;
 						fprintf(stdout, "%s%-8s%s%s\n", color_ok, "ok", color_reset, distfile->name);
 					} else {
