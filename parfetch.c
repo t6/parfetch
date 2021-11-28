@@ -70,6 +70,28 @@ enum SitesType {
 	PATCH_SITES,
 };
 
+struct ParfetchOptions {
+	FILE *out;
+
+	const char *color_error;
+	const char *color_info;
+	const char *color_ok;
+	const char *color_reset;
+	const char *color_warning;
+
+	const char *distdir;
+	const char *dist_subdir;
+	const char *distinfo_file;
+	const char *target;
+
+	long max_host_connections;
+	long max_total_connections;
+	bool disable_size;
+	bool no_checksum;
+	bool makesum;
+	bool want_colors;
+};
+
 struct Distfile {
 	struct Mempool *pool;
 	enum SitesType sites_type;
@@ -92,6 +114,7 @@ struct DistfileQueueEntry {
 
 // Prototypes
 static const char *makevar(const char *);
+static void parfetch_init_options(void);
 static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, enum SitesType, const char *);
 static struct Distinfo *load_distinfo(struct Mempool *);
 static bool check_checksum(struct Distinfo *, struct Distfile *, SHA2_CTX *);
@@ -103,11 +126,7 @@ static size_t fetch_distfile_write_cb(char *, size_t, size_t, void *);
 static void check_multi_info(CURLM *);
 static bool response_code_ok(long, long);
 
-static const char *color_error = ANSI_COLOR_RED;
-static const char *color_info = ANSI_COLOR_BLUE;
-static const char *color_ok = ANSI_COLOR_GREEN;
-static const char *color_reset = ANSI_COLOR_RESET;
-static const char *color_warning = ANSI_COLOR_YELLOW;
+static struct ParfetchOptions opts;
 
 const char *
 makevar(const char *var)
@@ -119,6 +138,63 @@ makevar(const char *var)
 		return env;
 	} else {
 		return NULL;
+	}
+}
+
+void
+parfetch_init_options()
+{
+	opts.target = makevar("TARGET");
+	unless (opts.target) {
+		errx(1, "dp_TARGET not set in the environment");
+	}
+	unless (strcmp(opts.target, "do-fetch") == 0 || strcmp(opts.target, "checksum") == 0 || strcmp(opts.target, "makesum") == 0) {
+		errx(1, "unsupported dp_TARGET value: %s", opts.target);
+	}
+
+	opts.out = stdout;
+	opts.color_error = ANSI_COLOR_RED;
+	opts.color_info = ANSI_COLOR_BLUE;
+	opts.color_ok = ANSI_COLOR_GREEN;
+	opts.color_reset = ANSI_COLOR_RESET;
+	opts.color_warning = ANSI_COLOR_YELLOW;
+	opts.want_colors = true;
+	unless (can_use_colors(opts.out)) {
+		opts.want_colors = false;
+		opts.color_error = opts.color_info = opts.color_ok = opts.color_reset = opts.color_warning = "";
+	}
+
+	opts.distdir = makevar("DISTDIR");
+	unless (opts.distdir) {
+		errx(1, "dp_DISTDIR not set in the environment");
+	}
+	opts.distinfo_file = makevar("DISTINFO_FILE");
+	unless (opts.distinfo_file) {
+		errx(1, "dp_DISTINFO_FILE not set in the environment");
+	}
+	opts.dist_subdir = makevar("DIST_SUBDIR");
+
+	opts.makesum = makevar("_PARFETCH_MAKESUM");
+	opts.disable_size = makevar("DISABLE_SIZE");
+	opts.no_checksum = makevar("NO_CHECKSUM");
+
+	opts.max_host_connections = 1;
+	opts.max_total_connections = 4;
+	const char *max_host_connections_env = makevar("PARFETCH_MAX_HOST_CONNECTIONS");
+	if (max_host_connections_env && strcmp(max_host_connections_env , "") != 0) {
+		const char *errstr = NULL;
+		opts.max_host_connections = strtonum(max_host_connections_env , 1, LONG_MAX, &errstr);
+		if (errstr) {
+			errx(1, "PARFETCH_MAX_HOST_CONNECTIONS: %s", errstr);
+		}
+	}
+	const char *max_total_connections_env = makevar("PARFETCH_MAX_TOTAL_CONNECTIONS");
+	if (max_total_connections_env && strcmp(max_total_connections_env, "") != 0) {
+		const char *errstr = NULL;
+		opts.max_total_connections = strtonum(max_total_connections_env, 1, LONG_MAX, &errstr);
+		if (errstr) {
+			errx(1, "PARFETCH_MAX_TOTAL_CONNECTIONS: %s", errstr);
+		}
 	}
 }
 
@@ -142,14 +218,13 @@ parse_distfile_arg(struct Mempool *pool, struct Distinfo *distinfo, enum SitesTy
 	{
 		SCOPE_MEMPOOL(pool);
 		const char *fullname;
-		const char *dist_subdir = makevar("DIST_SUBDIR");
-		if (dist_subdir) {
-			fullname = str_printf(pool, "%s/%s", dist_subdir, distfile->name);
+		if (opts.dist_subdir) {
+			fullname = str_printf(pool, "%s/%s", opts.dist_subdir, distfile->name);
 		} else {
 			fullname = distfile->name;
 		}
 		distfile->distinfo = distinfo_entry(distinfo, fullname);
-		if (!distfile->distinfo && makevar("_PARFETCH_MAKESUM")) {
+		if (!distfile->distinfo && opts.makesum) {
 			// We add a new entry so update the timestamp
 			distinfo_set_timestamp(distinfo, time(NULL));
 			distinfo_add_entry(distinfo, &(struct DistinfoEntry){
@@ -158,7 +233,7 @@ parse_distfile_arg(struct Mempool *pool, struct Distinfo *distinfo, enum SitesTy
 			distfile->distinfo = distinfo_entry(distinfo, fullname);
 		}
 		unless (distfile->distinfo) {
-			if (!makevar("NO_CHECKSUM") && !makevar("DISABLE_SIZE")) {
+			if (!opts.no_checksum && !opts.disable_size) {
 				errx(1, "missing distinfo entry for %s", fullname);
 			}
 		}
@@ -172,30 +247,25 @@ load_distinfo(struct Mempool *extpool)
 {
 	SCOPE_MEMPOOL(pool);
 
-	const char *distinfo_file = makevar("DISTINFO_FILE");
-	unless (distinfo_file) {
-		errx(1, "dp_DISTINFO_FILE not set in the environment");
-	}
-
-	FILE *f = mempool_fopenat(pool, AT_FDCWD, distinfo_file, "r", 0);
+	FILE *f = mempool_fopenat(pool, AT_FDCWD, opts.distinfo_file, "r", 0);
 	unless (f) {
-		if (makevar("_PARFETCH_MAKESUM")) {
+		if (opts.makesum) {
 			struct Distinfo *distinfo = distinfo_new();
 			distinfo_set_timestamp(distinfo, time(NULL));
 			return distinfo;
-		} else if (makevar("NO_CHECKSUM") && makevar("DISABLE_SIZE")) {
+		} else if (opts.no_checksum && opts.disable_size) {
 			return NULL;
 		} else {
-			err(1, "could not open %s", distinfo_file);
+			err(1, "could not open %s", opts.distinfo_file);
 		}
 	}
 
 	struct Array *errors = NULL;
 	struct Distinfo *distinfo = distinfo_parse(f, pool, &errors);
 	unless (distinfo) {
-		warnx("could not parse %s", distinfo_file);
+		warnx("could not parse %s", opts.distinfo_file);
 		ARRAY_FOREACH(errors, const char *, line) {
-			fprintf(stderr, "%s:%s\n", distinfo_file, line);
+			fprintf(stderr, "%s:%s\n", opts.distinfo_file, line);
 		}
 		exit(1);
 	}
@@ -209,7 +279,7 @@ load_distinfo(struct Mempool *extpool)
 bool
 check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, SHA2_CTX *ctx)
 {
-	if (makevar("NO_CHECKSUM") && !makevar("_PARFETCH_MAKESUM")) {
+	if (opts.no_checksum && !opts.makesum) {
 		return true;
 	} else if (distfile->distinfo) {
 		char digest[SHA256_DIGEST_STRING_LENGTH + 1];
@@ -219,7 +289,7 @@ check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, SHA2_CTX *c
 		} else {
 			checksum = SHA256File(distfile->name, digest);
 		}
-		if (makevar("_PARFETCH_MAKESUM")) {
+		if (opts.makesum) {
 			unless (checksum) {
 				errx(1, "could not checksum %s", distfile->name);
 			}
@@ -312,7 +382,7 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 		curl_easy_setopt(eh, CURLOPT_XFERINFODATA, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_PRIVATE, queue_entry);
 		curl_easy_setopt(eh, CURLOPT_URL, queue_entry->url);
-		if (makevar("DISABLE_SIZE")) {
+		if (opts.disable_size) {
 			// nothing
 		} else if (queue_entry->distfile->distinfo) {
 			curl_easy_setopt(eh, CURLOPT_MAXFILESIZE_LARGE, queue_entry->distfile->distinfo->size);
@@ -331,7 +401,7 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 			}
 		}
 		curl_multi_add_handle(cm, eh);
-		fprintf(stdout, "%s%-8s%s%s\n", color_info, "queued", color_reset, queue_entry->url);
+		fprintf(opts.out, "%s%-8s%s%s\n", opts.color_info, "queued", opts.color_reset, queue_entry->url);
 	}
 }
 
@@ -342,8 +412,8 @@ fetch_distfile_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
 	// comprehensive or show progress for all files. It's
 	// important to show progress for longer downloads.
 	static time_t last_progress = 0;
-	if (strcmp(color_reset, "") == 0) {
-		// stdout is not a tty
+	unless (opts.want_colors) {
+		// opts.out is not a tty
 		return 0;
 	}
 	struct DistfileQueueEntry *queue_entry = userdata;
@@ -357,7 +427,7 @@ fetch_distfile_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
 			percent = (100 * dlnow) / dltotal;
 		}
 		if (percent > 0 && percent < 100) {
-			fprintf(stdout, "%2d %%    %s\n", percent, queue_entry->distfile->name);
+			fprintf(opts.out, "%2d %%    %s\n", percent, queue_entry->distfile->name);
 		}
 	}
 	return 0;
@@ -385,35 +455,35 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 	unlink(queue_entry->distfile->name);
 	queue_entry->distfile->fetched = false;
 
-	fprintf(stdout, "%s%-8s%s%s", color_error, "error", color_reset, queue_entry->url);
+	fprintf(opts.out, "%s%-8s%s%s", opts.color_error, "error", opts.color_reset, queue_entry->url);
 
 	switch (reason) {
 	case FETCH_DISTFILE_NEXT_MIRROR:
-		fputc('\n', stdout);
+		fputc('\n', opts.out);
 		break;
 	case FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH:
-		fprintf(stdout, " %s%s%s\n", color_error, "checksum mismatch", color_reset);
+		fprintf(opts.out, " %s%s%s\n", opts.color_error, "checksum mismatch", opts.color_reset);
 		break;
 	case FETCH_DISTFILE_NEXT_SIZE_MISMATCH:
 		if (queue_entry->distfile->distinfo) {
-			fprintf(stdout, " %ssize mismatch (expected: %zu, actual: %zu)%s\n",
-				color_error, queue_entry->distfile->distinfo->size, queue_entry->size, color_reset);
+			fprintf(opts.out, " %ssize mismatch (expected: %zu, actual: %zu)%s\n",
+				opts.color_error, queue_entry->distfile->distinfo->size, queue_entry->size, opts.color_reset);
 		} else {
-			fputc('\n', stdout);
+			fputc('\n', opts.out);
 		}
 		break;
 	case FETCH_DISTFILE_NEXT_HTTP_ERROR:
-		fputc('\n', stdout);
+		fputc('\n', opts.out);
 		break;
 	}
 	if (msg) {
-		fprintf(stdout, "%8s%s%s%s\n", "", color_error, msg, color_reset);
+		fprintf(opts.out, "%8s%s%s%s\n", "", opts.color_error, msg, opts.color_reset);
 	}
 
 	// queue next mirror for file
-	fprintf(stdout, "%8s%s\n", "", next_mirror_msg);
+	fprintf(opts.out, "%8s%s\n", "", next_mirror_msg);
 
-	fprintf(stdout, "%s%-8s%s%s\n", color_warning, "unlink", color_reset, queue_entry->distfile->name);
+	fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, queue_entry->distfile->name);
 	fetch_distfile(cm, queue_entry->distfile->queue);
 }
 
@@ -463,15 +533,14 @@ check_multi_info(CURLM *cm)
 				goto general_curl_error;
 			}
 			if (response_code_ok(response_code, protocol) && message->data.result == CURLE_OK) { // no error
-				if (makevar("DISABLE_SIZE")) {
-					if (makevar("_PARFETCH_MAKESUM") &&
-					    queue_entry->distfile->distinfo->size != queue_entry->size) {
+				if (opts.disable_size) {
+					if (opts.makesum && queue_entry->distfile->distinfo->size != queue_entry->size) {
 						distinfo_set_timestamp(queue_entry->distinfo, time(NULL));
 						queue_entry->distfile->distinfo->size = queue_entry->size;
 					}
 					if (check_checksum(queue_entry->distinfo, queue_entry->distfile, &queue_entry->checksum_ctx)) {
 						queue_entry->distfile->fetched = true;
-						fprintf(stdout, "%s%-8s%s%s\n", color_ok, "done", color_reset, queue_entry->distfile->name);
+						fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "done", opts.color_reset, queue_entry->distfile->name);
 					} else {
 						fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH, NULL);
 					}
@@ -479,7 +548,7 @@ check_multi_info(CURLM *cm)
 					if (queue_entry->size == queue_entry->distfile->distinfo->size) {
 						if (check_checksum(queue_entry->distinfo, queue_entry->distfile, &queue_entry->checksum_ctx)) {
 							queue_entry->distfile->fetched = true;
-							fprintf(stdout, "%s%-8s%s%s\n", color_ok, "done", color_reset, queue_entry->distfile->name);
+							fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "done", opts.color_reset, queue_entry->distfile->name);
 						} else {
 							fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH, NULL);
 						}
@@ -503,7 +572,7 @@ general_curl_error:
 			curl_easy_cleanup(message->easy_handle);
 			break;
 		} default:
-			fprintf(stdout, "%s%-8s%s%d\n", color_error, "error", color_reset, message->msg);
+			fprintf(opts.out, "%s%-8s%s%d\n", opts.color_error, "error", opts.color_reset, message->msg);
 		break;
 		}
 	}
@@ -514,40 +583,13 @@ main(int argc, char *argv[])
 {
 	struct Mempool *pool = mempool_new(); // XXX: pool might outlive main() via libcurl!
 
-	unless (can_use_colors(stdout)) {
-		color_error = color_info = color_ok = color_reset = color_warning = "";
-	}
+	parfetch_init_options();
 
-	const char *distdir = makevar("DISTDIR");
-	unless (distdir) {
-		errx(1, "dp_DISTDIR not set in the environment");
+	unless (mkdirp(opts.distdir)) {
+		err(1, "mkdirp: %s", opts.distdir);
 	}
-	unless (mkdirp(distdir)) {
-		err(1, "mkdirp: %s", distdir);
-	}
-	if (chdir(distdir) == -1) {
-		err(1, "chdir: %s", distdir);
-	}
-
-	long max_host_connections = 1;
-	long max_total_connections = 4;
-	{
-		const char *max_host_connections_env = makevar("PARFETCH_MAX_HOST_CONNECTIONS");
-		if (max_host_connections_env && strcmp(max_host_connections_env , "") != 0) {
-			const char *errstr = NULL;
-			max_host_connections = strtonum(max_host_connections_env , 1, LONG_MAX, &errstr);
-			if (errstr) {
-				errx(1, "PARFETCH_MAX_HOST_CONNECTIONS: %s", errstr);
-			}
-		}
-		const char *max_total_connections_env = makevar("PARFETCH_MAX_TOTAL_CONNECTIONS");
-		if (max_total_connections_env && strcmp(max_total_connections_env, "") != 0) {
-			const char *errstr = NULL;
-			max_total_connections = strtonum(max_total_connections_env, 1, LONG_MAX, &errstr);
-			if (errstr) {
-				errx(1, "PARFETCH_MAX_TOTAL_CONNECTIONS: %s", errstr);
-			}
-		}
+	if (chdir(opts.distdir) == -1) {
+		err(1, "chdir: %s", opts.distdir);
 	}
 
 	struct Distinfo *distinfo = load_distinfo(pool);
@@ -569,21 +611,13 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	const char *target = makevar("TARGET");
-	unless (target) {
-		errx(1, "dp_TARGET not set in the environment");
-	}
-	unless (strcmp(target, "do-fetch") == 0 || strcmp(target, "checksum") == 0 || strcmp(target, "makesum") == 0) {
-		errx(1, "unsupported dp_TARGET value: %s", target);
-	}
-
 	prepare_distfile_queues(pool, distinfo, distfiles);
 
 	// Check file existence and checksums if requested
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
 		struct stat st;
 		if (stat(distfile->name, &st) >= 0) {
-			if (makevar("_PARFETCH_MAKESUM")) {
+			if (opts.makesum) {
 				distfile->fetched = true;
 				if (check_checksum(distinfo, distfile, NULL)) {
 					distfile->fetched = true;
@@ -591,39 +625,39 @@ main(int argc, char *argv[])
 						distinfo_set_timestamp(distinfo, time(NULL));
 						distfile->distinfo->size = st.st_size;
 					}
-					fprintf(stdout, "%s%-8s%s%s\n", color_ok, "ok", color_reset, distfile->name);
+					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, distfile->name);
 				} else {
 					panic("check_checksum() returned with failure in makesum mode");
 				}
-			} else if (makevar("DISABLE_SIZE")) {
-				if (makevar("NO_CHECKSUM")) {
+			} else if (opts.disable_size) {
+				if (opts.no_checksum) {
 					distfile->fetched = true;
 				} else if (check_checksum(distinfo, distfile, NULL)) {
 					distfile->fetched = true;
-					fprintf(stdout, "%s%-8s%s%s\n", color_ok, "ok", color_reset, distfile->name);
+					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, distfile->name);
 				} else {
 					distfile->fetched = false;
-					fprintf(stdout, "%s%-8s%s%s %schecksum mismatch%s\n", color_error, "error", color_reset, distfile->name, color_error, color_reset);
-					fprintf(stdout, "%s%-8s%s%s\n", color_warning, "unlink", color_reset, distfile->name);
+					fprintf(opts.out, "%s%-8s%s%s %schecksum mismatch%s\n", opts.color_error, "error", opts.color_reset, distfile->name, opts.color_error, opts.color_reset);
+					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
 					unlink(distfile->name);
 				}
 			} else if (distfile->distinfo) {
 				if (distfile->distinfo->size == st.st_size) {
-					if (makevar("NO_CHECKSUM")) {
+					if (opts.no_checksum) {
 						distfile->fetched = true;
 					} else if (check_checksum(distinfo, distfile, NULL)) {
 						distfile->fetched = true;
-						fprintf(stdout, "%s%-8s%s%s\n", color_ok, "ok", color_reset, distfile->name);
+						fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, distfile->name);
 					} else {
 						distfile->fetched = false;
-						fprintf(stdout, "%s%-8s%s%s %schecksum mismatch%s\n", color_error, "error", color_reset, distfile->name, color_error, color_reset);
-						fprintf(stdout, "%s%-8s%s%s\n", color_warning, "unlink", color_reset, distfile->name);
+						fprintf(opts.out, "%s%-8s%s%s %schecksum mismatch%s\n", opts.color_error, "error", opts.color_reset, distfile->name, opts.color_error, opts.color_reset);
+						fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
 						unlink(distfile->name);
 					}
 				} else {
-					fprintf(stdout, "%s%-8s%s%s %ssize mismatch (expected: %zu, actual: %zu)%s\n", color_error, "error", color_reset, distfile->name,
-						color_error, distfile->distinfo->size, st.st_size, color_reset);
-					fprintf(stdout, "%s%-8s%s%s\n", color_warning, "unlink", color_reset, distfile->name);
+					fprintf(opts.out, "%s%-8s%s%s %ssize mismatch (expected: %zu, actual: %zu)%s\n", opts.color_error, "error", opts.color_reset, distfile->name,
+						opts.color_error, distfile->distinfo->size, st.st_size, opts.color_reset);
+					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
 					unlink(distfile->name);
 					distfile->fetched = false;
 				}
@@ -638,8 +672,8 @@ main(int argc, char *argv[])
 	struct ParfetchCurl *loop = parfetch_curl_init(check_multi_info);
 	CURLM *cm = parfetch_curl_multi(loop);
 	curl_multi_setopt(cm, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
-	curl_multi_setopt(cm, CURLMOPT_MAX_HOST_CONNECTIONS, max_host_connections);
-	curl_multi_setopt(cm, CURLMOPT_MAX_TOTAL_CONNECTIONS, max_total_connections);
+	curl_multi_setopt(cm, CURLMOPT_MAX_HOST_CONNECTIONS, opts.max_host_connections);
+	curl_multi_setopt(cm, CURLMOPT_MAX_TOTAL_CONNECTIONS, opts.max_total_connections);
 
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
 		unless (distfile->fetched) {
@@ -670,7 +704,7 @@ main(int argc, char *argv[])
 				err(1, "could not open %s", distinfo_file);
 			}
 			distinfo_serialize(distinfo, f);
-			fprintf(stdout, "%s%-8s%s%s\n", color_info, "updated", color_reset, distinfo_file);
+			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_info, "updated", opts.color_reset, distinfo_file);
 		}
 		return 0;
 	} else {
