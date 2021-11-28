@@ -16,6 +16,10 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
 * When `PARFETCH_MAKESUM_KEEP_TIMESTAMP` is defined `makesum`
   will not update `TIMESTAMP` in `distinfo`. This can be useful
   when refreshing patches with no code changes.
+* "Ephemeral" makesum through `PARFETCH_MAKESUM_EPHEMERAL`:
+  Create/update `distinfo` but never save any distfiles. Note that
+  the files are still downloaded completely to checksum them but
+  `DISTDIR` is left untouched.
 
 == [a20211126] - 2021-11-26
 

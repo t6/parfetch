@@ -89,6 +89,7 @@ struct ParfetchOptions {
 	bool disable_size;
 	bool no_checksum;
 	bool makesum;
+	bool makesum_ephemeral;
 	bool makesum_keep_timestamp;
 	bool want_colors;
 };
@@ -176,6 +177,7 @@ parfetch_init_options()
 	opts.dist_subdir = makevar("DIST_SUBDIR");
 
 	opts.makesum = makevar("_PARFETCH_MAKESUM");
+	opts.makesum_ephemeral = makevar("PARFETCH_MAKESUM_EPHEMERAL");
 	opts.makesum_keep_timestamp = makevar("PARFETCH_MAKESUM_KEEP_TIMESTAMP");
 	opts.disable_size = makevar("DISABLE_SIZE");
 	opts.no_checksum = makevar("NO_CHECKSUM");
@@ -370,16 +372,18 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 		if (queue_entry->distfile->fh) {
 			fclose(queue_entry->distfile->fh);
 		}
-		{
+		if (opts.makesum && opts.makesum_ephemeral) {
+			queue_entry->distfile->fh = NULL;
+		} else {
 			SCOPE_MEMPOOL(pool);
 			char *dir = dirname(str_dup(pool, queue_entry->filename));
 			unless (mkdirp(dir)) {
 				err(1, "mkdirp: %s", dir);
 			}
-		}
-		queue_entry->distfile->fh = fopen(queue_entry->filename, "wb");
-		unless (queue_entry->distfile->fh) {
-			errx(1, "fopen: %s", queue_entry->filename);
+			queue_entry->distfile->fh = fopen(queue_entry->filename, "wb");
+			unless (queue_entry->distfile->fh) {
+				errx(1, "could not open: %s", queue_entry->filename);
+			}
 		}
 		CURL *eh = curl_easy_init();
 		curl_easy_setopt(eh, CURLOPT_FOLLOWLOCATION, 1L);
@@ -445,7 +449,12 @@ size_t
 fetch_distfile_write_cb(char *data, size_t size, size_t nmemb, void *userdata)
 {
 	struct DistfileQueueEntry *queue_entry = userdata;
-	size_t written = fwrite(data, size, nmemb, queue_entry->distfile->fh);
+	size_t written;
+	if (queue_entry->distfile->fh) {
+		written = fwrite(data, size, nmemb, queue_entry->distfile->fh);
+	} else {
+		written = size * nmemb;
+	}
 	queue_entry->size += written;
 	SHA256Update(&queue_entry->checksum_ctx, (u_int8_t *)data, written);
 	return written;
@@ -595,11 +604,13 @@ main(int argc, char *argv[])
 
 	parfetch_init_options();
 
-	unless (mkdirp(opts.distdir)) {
-		err(1, "mkdirp: %s", opts.distdir);
-	}
-	if (chdir(opts.distdir) == -1) {
-		err(1, "chdir: %s", opts.distdir);
+	unless (opts.makesum && opts.makesum_ephemeral) {
+		unless (mkdirp(opts.distdir)) {
+			err(1, "mkdirp: %s", opts.distdir);
+		}
+		if (chdir(opts.distdir) == -1) {
+			err(1, "chdir: %s", opts.distdir);
+		}
 	}
 
 	struct Distinfo *distinfo = load_distinfo(pool);
