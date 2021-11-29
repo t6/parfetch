@@ -68,7 +68,7 @@ checksum:
 .endif
 
 .if !target(makesum)
-makesum: check-sanity
+makesum:
 	@${MAKE} fetch _PARFETCH_MAKESUM=yes NO_CHECKSUM=yes DISABLE_SIZE=yes \
 		DISTFILES="${DISTFILES}" MASTER_SITES="${MASTER_SITES}" \
 		PATCH_SITES="${PATCH_SITES}"
