@@ -21,6 +21,15 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
   the files are still downloaded completely to checksum them but
   `DISTDIR` is left untouched.
 
+=== Changed
+
+* Speed up initial checksum: For already existing distfiles
+  open them in non-blocking mode and do the checksumming
+  asynchronously instead of one by one to reduce idle time.
+  This speeds up the whole operation a little. Numbers for
+  `makesum` in `x11/wezterm`: framework 7.35s, parfetch before
+  4.83s, parfetch after 3.24s
+
 == [a20211126] - 2021-11-26
 
 No changelog for old releases.

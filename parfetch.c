@@ -114,6 +114,18 @@ struct DistfileQueueEntry {
 	curl_off_t size;
 };
 
+struct InitialDistfileCheckData {
+	struct Mempool *pool;
+	struct event_base *base;
+	struct event *event;
+	struct Queue *files_to_checksum;
+	struct Array *finished_files;
+	struct Distfile *distfile;
+	int fd;
+	int error;
+	SHA2_CTX checksum_ctx;
+};
+
 // Prototypes
 static const char *makevar(const char *);
 static void parfetch_init_options(void);
@@ -122,6 +134,8 @@ static struct Distinfo *load_distinfo(struct Mempool *);
 static bool check_checksum(struct Distinfo *, struct Distfile *, SHA2_CTX *);
 static void prepare_distfile_queues(struct Mempool *, struct Distinfo *, struct Array *);
 static void initial_distfile_check(struct Distinfo *, struct Array *);
+static void initial_distfile_check_queue_file(struct Mempool *, struct event_base *, struct Queue *, struct Array *);
+static void initial_distfile_check_cb(evutil_socket_t, short, void *);
 static void fetch_distfile(CURLM *, struct Queue *);
 static void fetch_distfile_next_mirror(struct DistfileQueueEntry *, CURLM *, enum FetchDistfileNextReason, const char *);
 static size_t fetch_distfile_progress_cb(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
@@ -130,6 +144,8 @@ static void check_multi_info(CURLM *);
 static bool response_code_ok(long, long);
 
 static struct ParfetchOptions opts;
+// basically how many open files we have at a time
+static const size_t INITIAL_DISTFILE_CHECK_QUEUE_SIZE = 64;
 
 const char *
 makevar(const char *var)
@@ -290,12 +306,7 @@ check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, SHA2_CTX *c
 		return true;
 	} else if (distfile->distinfo) {
 		char digest[SHA256_DIGEST_STRING_LENGTH + 1];
-		char *checksum = NULL;
-		if (ctx) {
-			checksum = SHA256End(ctx, digest);
-		} else {
-			checksum = SHA256File(distfile->name, digest);
-		}
+		char *checksum = SHA256End(ctx, digest);
 		if (opts.makesum) {
 			unless (checksum) {
 				errx(1, "could not checksum %s", distfile->name);
@@ -366,6 +377,58 @@ prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct 
 }
 
 void
+initial_distfile_check_cb(evutil_socket_t fd, short what, void *userdata)
+{
+	struct InitialDistfileCheckData *this = userdata;
+	uint8_t buf[65536];
+	ssize_t nread = read(fd, buf, sizeof(buf));
+	if (nread < 0) {
+		unless (errno == EAGAIN) {
+			this->error = errno;
+			event_del(this->event);
+			close(this->fd);
+			this->fd = -1;
+			array_append(this->finished_files, this);
+		}
+		return;
+	} else if (nread != 0) {
+		SHA256Update(&this->checksum_ctx, buf, nread);
+	}
+
+	if (nread == 0 || nread != sizeof(buf)) {
+		event_del(this->event);
+		close(this->fd);
+		this->fd = -1;
+		array_append(this->finished_files, this);
+		initial_distfile_check_queue_file(this->pool, this->base, this->files_to_checksum, this->finished_files);
+	}
+}
+
+void
+initial_distfile_check_queue_file(struct Mempool *pool, struct event_base *base, struct Queue *files_to_checksum, struct Array *finished_files)
+{
+	struct Distfile *distfile = queue_pop(files_to_checksum);
+	unless (distfile) {
+		return;
+	}
+	struct InitialDistfileCheckData *this = mempool_alloc(pool, sizeof(struct InitialDistfileCheckData));
+	SHA256Init(&this->checksum_ctx);
+	this->pool = pool;
+	this->base = base;
+	this->distfile = distfile;
+	this->files_to_checksum = files_to_checksum;
+	this->finished_files = finished_files;
+	this->fd = open(this->distfile->name, O_RDONLY | O_NONBLOCK);
+	if (this->fd == -1) {
+		this->error = errno;
+		array_append(finished_files, this);
+	} else {
+		this->event = event_new(base, this->fd, EV_READ | EV_PERSIST, initial_distfile_check_cb, this);
+		event_add(this->event, NULL);
+	}
+}
+
+void
 initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 {
 	SCOPE_MEMPOOL(pool);
@@ -412,16 +475,36 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 		}
 	}
 
-	QUEUE_FOREACH(files_to_checksum, struct Distfile *, distfile) {
-		if (check_checksum(distinfo, distfile, NULL)) {
-			distfile->fetched = true;
-			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, distfile->name);
+	struct event_base *base = mempool_add(pool, event_base_new(), event_base_free);
+	struct Array *finished_files = mempool_array(pool);
+	for (size_t i = 0; i < INITIAL_DISTFILE_CHECK_QUEUE_SIZE && queue_len(files_to_checksum) != 0; i++) {
+		initial_distfile_check_queue_file(pool, base, files_to_checksum, finished_files);
+	}
+	event_base_dispatch(base);
+
+	// We SHA256End() afterwards to avoid pauses when feeding
+	// the checksummer. SHA256End() might take a while and
+	// could block the event loop.
+	ARRAY_FOREACH(finished_files, struct InitialDistfileCheckData *, this) {
+		if (this->error != 0) {
+			fprintf(opts.out, "%s%-8s%s%s could not checksum: %s%s%s\n",
+				opts.color_error, "error", opts.color_reset, this->distfile->name,
+				opts.color_error, strerror(this->error), opts.color_reset);
+			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, this->distfile->name);
+			unlink(this->distfile->name);
+			this->distfile->fetched = false;
+		} else if (check_checksum(distinfo, this->distfile, &this->checksum_ctx)) {
+			this->distfile->fetched = true;
+			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, this->distfile->name);
 		} else if (opts.makesum) {
 			panic("check_checksum() returned with failure in makesum mode");
 		} else {
-			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
-			unlink(distfile->name);
-			distfile->fetched = false;
+			fprintf(opts.out, "%s%-8s%s%s %s%s%s\n",
+				opts.color_error, "error", opts.color_reset, this->distfile->name,
+				opts.color_error, "checksum mismatch", opts.color_reset);
+			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, this->distfile->name);
+			unlink(this->distfile->name);
+			this->distfile->fetched = false;
 		}
 	}
 }
