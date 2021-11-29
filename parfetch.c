@@ -121,6 +121,7 @@ static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, 
 static struct Distinfo *load_distinfo(struct Mempool *);
 static bool check_checksum(struct Distinfo *, struct Distfile *, SHA2_CTX *);
 static void prepare_distfile_queues(struct Mempool *, struct Distinfo *, struct Array *);
+static void initial_distfile_check(struct Distinfo *, struct Array *);
 static void fetch_distfile(CURLM *, struct Queue *);
 static void fetch_distfile_next_mirror(struct DistfileQueueEntry *, CURLM *, enum FetchDistfileNextReason, const char *);
 static size_t fetch_distfile_progress_cb(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
@@ -360,6 +361,67 @@ prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct 
 				SHA256Init(&e->checksum_ctx);
 				queue_push(distfile->queue, e);
 			}
+		}
+	}
+}
+
+void
+initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
+{
+	SCOPE_MEMPOOL(pool);
+
+	// Check file existence and checksums if requested
+	struct Queue *files_to_checksum = mempool_queue(pool);
+	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
+		struct stat st;
+		if (stat(distfile->name, &st) >= 0) {
+			if (opts.makesum) {
+				distfile->fetched = true;
+				if (distfile->distinfo->size != st.st_size) {
+					unless (opts.makesum_keep_timestamp) {
+						distinfo_set_timestamp(distinfo, time(NULL));
+					}
+					distfile->distinfo->size = st.st_size;
+				}
+				queue_push(files_to_checksum, distfile);
+			} else if (opts.disable_size) {
+				if (opts.no_checksum) {
+					distfile->fetched = true;
+				} else {
+					queue_push(files_to_checksum, distfile);
+				}
+			} else if (distfile->distinfo) {
+				if (distfile->distinfo->size == st.st_size) {
+					if (opts.no_checksum) {
+						distfile->fetched = true;
+					} else {
+						queue_push(files_to_checksum, distfile);
+					}
+				} else {
+					fprintf(opts.out, "%s%-8s%s%s %ssize mismatch (expected: %zu, actual: %zu)%s\n", opts.color_error, "error", opts.color_reset, distfile->name,
+						opts.color_error, distfile->distinfo->size, st.st_size, opts.color_reset);
+					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
+					unlink(distfile->name);
+					distfile->fetched = false;
+				}
+			} else {
+				err(1, "DISABLE_SIZE not set but distinfo not loaded");
+			}
+		} else { // missing
+			distfile->fetched = false;
+		}
+	}
+
+	QUEUE_FOREACH(files_to_checksum, struct Distfile *, distfile) {
+		if (check_checksum(distinfo, distfile, NULL)) {
+			distfile->fetched = true;
+			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, distfile->name);
+		} else if (opts.makesum) {
+			panic("check_checksum() returned with failure in makesum mode");
+		} else {
+			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
+			unlink(distfile->name);
+			distfile->fetched = false;
 		}
 	}
 }
@@ -633,64 +695,7 @@ main(int argc, char *argv[])
 	argv += optind;
 
 	prepare_distfile_queues(pool, distinfo, distfiles);
-
-	// Check file existence and checksums if requested
-	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
-		struct stat st;
-		if (stat(distfile->name, &st) >= 0) {
-			if (opts.makesum) {
-				distfile->fetched = true;
-				if (check_checksum(distinfo, distfile, NULL)) {
-					distfile->fetched = true;
-					if (distfile->distinfo->size != st.st_size) {
-						unless (opts.makesum_keep_timestamp) {
-							distinfo_set_timestamp(distinfo, time(NULL));
-						}
-						distfile->distinfo->size = st.st_size;
-					}
-					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, distfile->name);
-				} else {
-					panic("check_checksum() returned with failure in makesum mode");
-				}
-			} else if (opts.disable_size) {
-				if (opts.no_checksum) {
-					distfile->fetched = true;
-				} else if (check_checksum(distinfo, distfile, NULL)) {
-					distfile->fetched = true;
-					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, distfile->name);
-				} else {
-					distfile->fetched = false;
-					fprintf(opts.out, "%s%-8s%s%s %schecksum mismatch%s\n", opts.color_error, "error", opts.color_reset, distfile->name, opts.color_error, opts.color_reset);
-					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
-					unlink(distfile->name);
-				}
-			} else if (distfile->distinfo) {
-				if (distfile->distinfo->size == st.st_size) {
-					if (opts.no_checksum) {
-						distfile->fetched = true;
-					} else if (check_checksum(distinfo, distfile, NULL)) {
-						distfile->fetched = true;
-						fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, distfile->name);
-					} else {
-						distfile->fetched = false;
-						fprintf(opts.out, "%s%-8s%s%s %schecksum mismatch%s\n", opts.color_error, "error", opts.color_reset, distfile->name, opts.color_error, opts.color_reset);
-						fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
-						unlink(distfile->name);
-					}
-				} else {
-					fprintf(opts.out, "%s%-8s%s%s %ssize mismatch (expected: %zu, actual: %zu)%s\n", opts.color_error, "error", opts.color_reset, distfile->name,
-						opts.color_error, distfile->distinfo->size, st.st_size, opts.color_reset);
-					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
-					unlink(distfile->name);
-					distfile->fetched = false;
-				}
-			} else {
-				err(1, "DISABLE_SIZE not set but distinfo not loaded");
-			}
-		} else { // missing
-			distfile->fetched = false;
-		}
-	}
+	initial_distfile_check(distinfo, distfiles);
 
 	struct ParfetchCurl *loop = parfetch_curl_init(check_multi_info);
 	CURLM *cm = parfetch_curl_multi(loop);
