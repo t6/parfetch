@@ -1,5 +1,5 @@
 CSTD = gnu99
-LDADD += $LDADD_EXECINFO $LDADD_SHA2
+LDADD += $LDADD_EXECINFO
 
 bundle libias.a
 	subdir = $srcdir/libias
@@ -24,17 +24,17 @@ bundle libias.a
 	libias/util.c
 
 bundle libparfetch.a
-	CFLAGS += `pkg-config --cflags libcurl libevent`
+	CFLAGS += `pkg-config --cflags libcurl libevent librhash`
 	loop.c
 	parfetch.c
 
 bin parfetch
-	LDADD += `pkg-config --libs libcurl libevent`
+	LDADD += `pkg-config --libs libcurl libevent librhash`
 	libias.a
 	libparfetch.a
 
 bin parfetch-static
-	LDADD += -static -Wl,--push-state -Wl,--static `pkg-config --static --libs libcurl libevent` -Wl,--pop-state
+	LDADD += -static -Wl,--push-state -Wl,--static `pkg-config --static --libs libcurl libevent librhash` -Wl,--pop-state
 	libias.a
 	libparfetch.a
 

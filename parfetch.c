@@ -33,9 +33,6 @@
 #endif
 #include <fcntl.h>
 #include <libgen.h>
-#if HAVE_SHA2
-# include <sha2.h>
-#endif
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -44,6 +41,8 @@
 
 #include <curl/curl.h>
 #include <event2/event.h>
+#include <rhash.h>
+
 #include <libias/array.h>
 #include <libias/color.h>
 #include <libias/distinfo.h>
@@ -110,7 +109,7 @@ struct DistfileQueueEntry {
 	struct Distfile *distfile;
 	const char *filename;
 	const char *url;
-	SHA2_CTX checksum_ctx;
+	rhash checksum_ctx;
 	curl_off_t size;
 };
 
@@ -123,7 +122,7 @@ struct InitialDistfileCheckData {
 	struct Distfile *distfile;
 	int fd;
 	int error;
-	SHA2_CTX checksum_ctx;
+	rhash checksum_ctx;
 };
 
 // Prototypes
@@ -131,7 +130,7 @@ static const char *makevar(const char *);
 static void parfetch_init_options(void);
 static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, enum SitesType, const char *);
 static struct Distinfo *load_distinfo(struct Mempool *);
-static bool check_checksum(struct Distinfo *, struct Distfile *, SHA2_CTX *);
+static bool check_checksum(struct Distinfo *, struct Distfile *, rhash);
 static void prepare_distfile_queues(struct Mempool *, struct Distinfo *, struct Array *);
 static void initial_distfile_check(struct Distinfo *, struct Array *);
 static void initial_distfile_check_queue_file(struct Mempool *, struct event_base *, struct Queue *, struct Array *);
@@ -300,17 +299,27 @@ load_distinfo(struct Mempool *extpool)
 }
 
 bool
-check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, SHA2_CTX *ctx)
+check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, rhash ctx)
 {
 	if (opts.no_checksum && !opts.makesum) {
 		return true;
 	} else if (distfile->distinfo) {
-		char digest[SHA256_DIGEST_STRING_LENGTH + 1];
-		char *checksum = SHA256End(ctx, digest);
-		if (opts.makesum) {
-			unless (checksum) {
-				errx(1, "could not checksum %s", distfile->name);
+		unless (rhash_final(ctx, NULL) == 0) {
+			if (opts.makesum) {
+				err(1, "could not checksum %s", distfile->name);
+			} else {
+				return false;
 			}
+		}
+		char checksum[130];
+		if (rhash_print(checksum, ctx, RHASH_SHA256, RHPR_HEX) == 0) {
+			if (opts.makesum) {
+				errx(1, "could not checksum %s", distfile->name);
+			} else {
+				return false;
+			}
+		}
+		if (opts.makesum) {
 			if (distfile->distinfo->digest) {
 				if (strcmp(distfile->distinfo->digest, checksum) != 0) {
 					unless (opts.makesum_keep_timestamp) {
@@ -326,7 +335,7 @@ check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, SHA2_CTX *c
 			}
 			return true;
 		} else {
-			return !(checksum && strcasecmp(checksum, distfile->distinfo->digest) != 0);
+			return strcasecmp(checksum, distfile->distinfo->digest) == 0;
 		}
 	} else {
 		errx(1, "NO_CHECKSUM not set but distinfo not loaded");
@@ -369,7 +378,7 @@ prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct 
 				e->distfile = distfile;
 				e->filename = str_dup(pool, distfile->name);
 				e->url = str_printf(pool, "%s%s", site, distfile->name);
-				SHA256Init(&e->checksum_ctx);
+				e->checksum_ctx = mempool_add(pool, rhash_init(RHASH_SHA256), rhash_free);
 				queue_push(distfile->queue, e);
 			}
 		}
@@ -392,7 +401,7 @@ initial_distfile_check_cb(evutil_socket_t fd, short what, void *userdata)
 		}
 		return;
 	} else if (nread != 0) {
-		SHA256Update(&this->checksum_ctx, buf, nread);
+		rhash_update(this->checksum_ctx, buf, nread);
 	}
 
 	if (nread == 0 || nread != sizeof(buf)) {
@@ -412,7 +421,7 @@ initial_distfile_check_queue_file(struct Mempool *pool, struct event_base *base,
 		return;
 	}
 	struct InitialDistfileCheckData *this = mempool_alloc(pool, sizeof(struct InitialDistfileCheckData));
-	SHA256Init(&this->checksum_ctx);
+	this->checksum_ctx = mempool_add(pool, rhash_init(RHASH_SHA256), rhash_free);
 	this->pool = pool;
 	this->base = base;
 	this->distfile = distfile;
@@ -482,9 +491,8 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 	}
 	event_base_dispatch(base);
 
-	// We SHA256End() afterwards to avoid pauses when feeding
-	// the checksummer. SHA256End() might take a while and
-	// could block the event loop.
+	// We finish the checksumming afterwards to avoid pauses.
+	// It might take a while and could block the event loop.
 	ARRAY_FOREACH(finished_files, struct InitialDistfileCheckData *, this) {
 		if (this->error != 0) {
 			fprintf(opts.out, "%s%-8s%s%s could not checksum: %s%s%s\n",
@@ -493,7 +501,7 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, this->distfile->name);
 			unlink(this->distfile->name);
 			this->distfile->fetched = false;
-		} else if (check_checksum(distinfo, this->distfile, &this->checksum_ctx)) {
+		} else if (check_checksum(distinfo, this->distfile, this->checksum_ctx)) {
 			this->distfile->fetched = true;
 			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, this->distfile->name);
 		} else if (opts.makesum) {
@@ -601,7 +609,7 @@ fetch_distfile_write_cb(char *data, size_t size, size_t nmemb, void *userdata)
 		written = size * nmemb;
 	}
 	queue_entry->size += written;
-	SHA256Update(&queue_entry->checksum_ctx, (u_int8_t *)data, written);
+	rhash_update(queue_entry->checksum_ctx, data, written);
 	return written;
 }
 
@@ -702,7 +710,7 @@ check_multi_info(CURLM *cm)
 						}
 						queue_entry->distfile->distinfo->size = queue_entry->size;
 					}
-					if (check_checksum(queue_entry->distinfo, queue_entry->distfile, &queue_entry->checksum_ctx)) {
+					if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->checksum_ctx)) {
 						queue_entry->distfile->fetched = true;
 						fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "done", opts.color_reset, queue_entry->distfile->name);
 					} else {
@@ -710,7 +718,7 @@ check_multi_info(CURLM *cm)
 					}
 				} else if (queue_entry->distfile->distinfo) {
 					if (queue_entry->size == queue_entry->distfile->distinfo->size) {
-						if (check_checksum(queue_entry->distinfo, queue_entry->distfile, &queue_entry->checksum_ctx)) {
+						if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->checksum_ctx)) {
 							queue_entry->distfile->fetched = true;
 							fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "done", opts.color_reset, queue_entry->distfile->name);
 						} else {
@@ -748,6 +756,7 @@ main(int argc, char *argv[])
 	struct Mempool *pool = mempool_new(); // XXX: pool might outlive main() via libcurl!
 
 	parfetch_init_options();
+	rhash_library_init();
 
 	unless (opts.makesum && opts.makesum_ephemeral) {
 		unless (mkdirp(opts.distdir)) {
