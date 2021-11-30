@@ -689,17 +689,19 @@ check_multi_info(CURLM *cm)
 		switch (message->msg) {
 		case CURLMSG_DONE: {
 			struct DistfileQueueEntry *queue_entry = NULL;
-			curl_easy_getinfo(message->easy_handle, CURLINFO_PRIVATE, &queue_entry);
+			// message becomes invalid after curl_easy_cleanup() or curl_multi_remove_handle()!
+			CURL *easy_handle = message->easy_handle;
+			curl_easy_getinfo(easy_handle, CURLINFO_PRIVATE, &queue_entry);
 			if (queue_entry->distfile->fh) {
 				fclose(queue_entry->distfile->fh);
 				queue_entry->distfile->fh = NULL;
 			}
 			long response_code = 0;
-			if (CURLE_OK != curl_easy_getinfo(message->easy_handle, CURLINFO_RESPONSE_CODE, &response_code) || response_code == 0) {
+			if (CURLE_OK != curl_easy_getinfo(easy_handle, CURLINFO_RESPONSE_CODE, &response_code) || response_code == 0) {
 				goto general_curl_error;
 			}
 			long protocol = 0;
-			if (CURLE_OK != curl_easy_getinfo(message->easy_handle, CURLINFO_PROTOCOL, &protocol) || protocol == 0) {
+			if (CURLE_OK != curl_easy_getinfo(easy_handle, CURLINFO_PROTOCOL, &protocol) || protocol == 0) {
 				goto general_curl_error;
 			}
 			if (response_code_ok(response_code, protocol) && message->data.result == CURLE_OK) { // no error
@@ -740,12 +742,12 @@ check_multi_info(CURLM *cm)
 general_curl_error:
 				fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_MIRROR, curl_easy_strerror(message->data.result));
 			}
-			curl_multi_remove_handle(cm, message->easy_handle);
-			curl_easy_cleanup(message->easy_handle);
+			curl_multi_remove_handle(cm, easy_handle);
+			curl_easy_cleanup(easy_handle);
 			break;
 		} default:
 			fprintf(opts.out, "%s%-8s%s%d\n", opts.color_error, "error", opts.color_reset, message->msg);
-		break;
+			break;
 		}
 	}
 }
