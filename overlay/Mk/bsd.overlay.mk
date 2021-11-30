@@ -25,7 +25,9 @@
 _INCLUDE_PARFETCH_OVERLAY=	yes
 
 .if !defined(PARFETCH)
-.  if exists(${LOCALBASE}/bin/parfetch)
+.  if exists(${LOCALBASE}/bin/parfetch-static)
+PARFETCH?=	${LOCALBASE}/bin/parfetch-static
+.  elif exists(${LOCALBASE}/bin/parfetch)
 PARFETCH?=	${LOCALBASE}/bin/parfetch
 .  endif
 # Try to use bin/parfetch-static from the overlay if parfetch
