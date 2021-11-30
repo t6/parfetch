@@ -755,7 +755,7 @@ general_curl_error:
 int
 main(int argc, char *argv[])
 {
-	struct Mempool *pool = mempool_new(); // XXX: pool might outlive main() via libcurl!
+	SCOPE_MEMPOOL(pool);
 
 	parfetch_init_options();
 	rhash_library_init();
