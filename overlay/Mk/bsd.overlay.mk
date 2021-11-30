@@ -63,10 +63,7 @@ do-fetch:
 .endif
 
 .if !target(checksum)
-checksum:
-.  if !defined(NO_CHECKSUM)
-	@${_DO_PARFETCH}
-.  endif
+checksum: fetch
 .endif
 
 .if !target(makesum)
