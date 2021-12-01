@@ -60,17 +60,18 @@ _DO_PARFETCH=	${SETENV} ${_PARFETCH_ENV} ${PARFETCH} \
 .if !target(do-fetch)
 do-fetch:
 	@${_DO_PARFETCH}
-.endif
 
-.if !target(checksum)
+.  if !target(checksum)
 checksum: fetch
-.endif
+.  endif
 
-.if !target(makesum)
+.  if !target(makesum)
 makesum:
 	@${MAKE} fetch _PARFETCH_MAKESUM=yes NO_CHECKSUM=yes DISABLE_SIZE=yes \
 		DISTFILES="${DISTFILES}" MASTER_SITES="${MASTER_SITES}" \
 		PATCH_SITES="${PATCH_SITES}"
+.  endif
+
 .endif
 
 .endif
