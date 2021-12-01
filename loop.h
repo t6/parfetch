@@ -26,8 +26,8 @@
 #pragma once
 
 struct ParfetchCurl;
+struct Array;
+struct event_base;
 
-struct ParfetchCurl *parfetch_curl_init(void (*check_multi_info)(CURLM *));
-void parfetch_curl_loop(struct ParfetchCurl *);
-struct event_base *parfetch_curl_event_base(struct ParfetchCurl *);
-CURLM *parfetch_curl_multi(struct ParfetchCurl *);
+struct ParfetchCurl *parfetch_curl_new(CURLM *, struct event_base *, void (*check_multi_info)(CURLM *), void *, void *);
+void parfetch_curl_free(struct ParfetchCurl *);

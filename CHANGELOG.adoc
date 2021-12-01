@@ -20,6 +20,7 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
   Create/update `distinfo` but never save any distfiles. Note that
   the files are still downloaded completely to checksum them but
   `DISTDIR` is left untouched.
+* Progress bar
 
 === Changed
 

@@ -27,6 +27,7 @@ bundle libparfetch.a
 	CFLAGS += `pkg-config --cflags libcurl libevent librhash`
 	loop.c
 	parfetch.c
+	progress.c
 
 bin parfetch
 	LDADD += `pkg-config --libs libcurl libevent librhash`

@@ -56,6 +56,7 @@
 #include <libias/str.h>
 
 #include "loop.h"
+#include "progress.h"
 
 enum FetchDistfileNextReason {
 	FETCH_DISTFILE_NEXT_MIRROR,
@@ -106,11 +107,13 @@ struct Distfile {
 
 struct DistfileQueueEntry {
 	struct Distinfo *distinfo;
+	struct Progress *progress;
 	struct Distfile *distfile;
 	const char *filename;
 	const char *url;
 	rhash checksum_ctx;
 	curl_off_t size;
+	curl_off_t dltotal;
 };
 
 struct InitialDistfileCheckData {
@@ -131,7 +134,7 @@ static void parfetch_init_options(void);
 static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, enum SitesType, const char *);
 static struct Distinfo *load_distinfo(struct Mempool *);
 static bool check_checksum(struct Distinfo *, struct Distfile *, rhash);
-static void prepare_distfile_queues(struct Mempool *, struct Distinfo *, struct Array *);
+static void prepare_distfile_queues(struct Mempool *, struct Distinfo *, struct Progress *, struct Array *);
 static void initial_distfile_check(struct Distinfo *, struct Array *);
 static void initial_distfile_check_queue_file(struct Mempool *, struct event_base *, struct Queue *, struct Array *);
 static void initial_distfile_check_cb(evutil_socket_t, short, void *);
@@ -343,7 +346,7 @@ check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, rhash ctx)
 }
 
 void
-prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct Array *distfiles)
+prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct Progress *progress, struct Array *distfiles)
 {
 	// collect MASTER_SITES / PATCH_SITES per group and create mirror queues
 	struct Map *groupsites[2];
@@ -375,6 +378,7 @@ prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct 
 			ARRAY_FOREACH(sites, const char *, site) {
 				struct DistfileQueueEntry *e = mempool_alloc(pool, sizeof(struct DistfileQueueEntry));
 				e->distinfo = distinfo;
+				e->progress = progress;
 				e->distfile = distfile;
 				e->filename = str_dup(pool, distfile->name);
 				e->url = str_printf(pool, "%s%s", site, distfile->name);
@@ -573,26 +577,15 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 size_t
 fetch_distfile_progress_cb(void *userdata, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
 {
-	// We show something every ~2s. This isn't meant to be
-	// comprehensive or show progress for all files. It's
-	// important to show progress for longer downloads.
-	static time_t last_progress = 0;
-	unless (opts.want_colors) {
-		// opts.out is not a tty
-		return 0;
-	}
 	struct DistfileQueueEntry *queue_entry = userdata;
-	time_t t = time(NULL);
-	if (last_progress < t && (t - last_progress) > 2) {
-		last_progress = t;
-		int percent;
-		if (dltotal == 0 || (dltotal == dlnow && queue_entry->size == 0)) {
-			percent = 0;
-		} else {
-			percent = (100 * dlnow) / dltotal;
-		}
-		if (percent > 0 && percent < 100) {
-			fprintf(opts.out, "%2d %%    %s\n", percent, queue_entry->distfile->name);
+	if (opts.makesum) {
+		// In makesum mode we don't know the size upfront
+		// so once curl knows update the total number of
+		// bytes.
+		if (dltotal != queue_entry->dltotal) {
+			progress_update_total(queue_entry->progress, -queue_entry->dltotal);
+			progress_update_total(queue_entry->progress, dltotal);
+			queue_entry->dltotal = dltotal;
 		}
 	}
 	return 0;
@@ -609,6 +602,7 @@ fetch_distfile_write_cb(char *data, size_t size, size_t nmemb, void *userdata)
 		written = size * nmemb;
 	}
 	queue_entry->size += written;
+	progress_update(queue_entry->progress, written, queue_entry->distfile->name);
 	rhash_update(queue_entry->checksum_ctx, data, written);
 	return written;
 }
@@ -624,6 +618,8 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 	// Try to delete the file
 	unlink(queue_entry->distfile->name);
 	queue_entry->distfile->fetched = false;
+	progress_update(queue_entry->progress, -queue_entry->size, NULL);
+	queue_entry->size = 0;
 
 	fprintf(opts.out, "%s%-8s%s%s", opts.color_error, "error", opts.color_reset, queue_entry->url);
 
@@ -788,23 +784,46 @@ main(int argc, char *argv[])
 	argc -= optind;
 	argv += optind;
 
-	prepare_distfile_queues(pool, distinfo, distfiles);
-	initial_distfile_check(distinfo, distfiles);
+	if (curl_global_init(CURL_GLOBAL_ALL)) {
+		errx(1, "could not init curl");
+	}
 
-	struct ParfetchCurl *loop = parfetch_curl_init(check_multi_info);
-	CURLM *cm = parfetch_curl_multi(loop);
+	CURLM *cm = curl_multi_init();
 	curl_multi_setopt(cm, CURLMOPT_PIPELINING, CURLPIPE_MULTIPLEX);
 	curl_multi_setopt(cm, CURLMOPT_MAX_HOST_CONNECTIONS, opts.max_host_connections);
 	curl_multi_setopt(cm, CURLMOPT_MAX_TOTAL_CONNECTIONS, opts.max_total_connections);
 
-	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
-		unless (distfile->fetched) {
-			fetch_distfile(cm, distfile->queue);
+	struct event_base *base = event_base_new();
+	struct Progress *progress = progress_new(base, opts.out);
+	struct ParfetchCurl *loop = parfetch_curl_new(cm, base, check_multi_info, progress_stop, progress);
+	unless (opts.makesum) {
+		ARRAY_FOREACH(distinfo_entries(distinfo, pool), struct DistinfoEntry *, entry) {
+			progress_update_total(progress, entry->size);
 		}
 	}
 
-	// do the work
-	parfetch_curl_loop(loop);
+	prepare_distfile_queues(pool, distinfo, progress, distfiles);
+	initial_distfile_check(distinfo, distfiles);
+
+	// do the work if needed
+	bool fetch = false;
+	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
+		unless (distfile->fetched) {
+			fetch = true;
+			fetch_distfile(cm, distfile->queue);
+		}
+	}
+	if (fetch) {
+		event_base_dispatch(base);
+	}
+
+	// cleanup
+	parfetch_curl_free(loop);
+	progress_free(progress);
+	event_base_free(base);
+	curl_multi_cleanup(cm);
+	curl_global_cleanup();
+	libevent_global_shutdown();
 
 	// Close/flush all open files and check that we fetched all of them
 	bool all_fetched = true;

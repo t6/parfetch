@@ -29,10 +29,14 @@
 #if HAVE_ERR
 # include <err.h>
 #endif
+#include <stdbool.h>
 #include <stdlib.h>
 
 #include <curl/curl.h>
 #include <event2/event.h>
+
+#include <libias/array.h>
+#include <libias/flow.h>
 #include <libias/mem.h>
 
 #include "loop.h"
@@ -48,6 +52,8 @@ struct ParfetchCurl {
 	struct event_base *base;
 	struct event *timeout;
 	void (*check_multi_info)(CURLM *);
+	void (*finished_cb)(void *);
+	void *finished_cb_data;
 };
 
 // Prototypes
@@ -59,20 +65,16 @@ static int start_timeout(CURLM *, long, void *);
 static int handle_socket(CURL *, curl_socket_t, int, void *, void *);
 
 struct ParfetchCurl *
-parfetch_curl_init(void (*check_multi_info)(CURLM *))
+parfetch_curl_new(CURLM *cm, struct event_base *base, void (*check_multi_info)(CURLM *), void *finished_cb, void *finished_cb_data)
 {
-	if (curl_global_init(CURL_GLOBAL_ALL)) {
-		errx(1, "could not init curl\n");
-	}
-
 	struct ParfetchCurl *this = xmalloc(sizeof(struct ParfetchCurl));
 	this->check_multi_info = check_multi_info;
-	CURLM *cm = curl_multi_init();
 	this->cm = cm;
-	struct event_base *base = event_base_new();
 	this->base = base;
 	struct event *timeout = evtimer_new(base, on_timeout, this);
 	this->timeout = timeout;
+	this->finished_cb = finished_cb;
+	this->finished_cb_data = finished_cb_data;
 
 	curl_multi_setopt(cm, CURLMOPT_SOCKETFUNCTION, handle_socket);
 	curl_multi_setopt(cm, CURLMOPT_SOCKETDATA, this);
@@ -83,29 +85,11 @@ parfetch_curl_init(void (*check_multi_info)(CURLM *))
 }
 
 void
-parfetch_curl_loop(struct ParfetchCurl *this)
+parfetch_curl_free(struct ParfetchCurl *this)
 {
-	event_base_dispatch(this->base);
-	curl_multi_cleanup(this->cm);
 	event_free(this->timeout);
-	event_base_free(this->base);
-	libevent_global_shutdown();
-	curl_global_cleanup();
 	free(this);
 }
-
-struct event_base *
-parfetch_curl_event_base(struct ParfetchCurl *this)
-{
-	return this->base;
-}
-
-CURLM *
-parfetch_curl_multi(struct ParfetchCurl *this)
-{
-	return this->cm;
-}
-
 
 struct CurlContext *
 curl_context_new(curl_socket_t sockfd, struct ParfetchCurl *this)
@@ -139,11 +123,16 @@ curl_perform(int fd, short event, void *userdata)
 
 	struct CurlContext *context = userdata;
 	int running_handles;
+	void (*finished_cb)(void *) = context->this->finished_cb;
+	void *finished_cb_data = context->this->finished_cb_data;
 	CURLM *cm = context->this->cm; // context might be invalid after curl_multi_socket_action()
 	void (*check_multi_info)(CURLM *) = context->this->check_multi_info;
 	curl_multi_socket_action(cm, context->sockfd, flags, &running_handles);
 	if (check_multi_info) {
 		check_multi_info(cm);
+	}
+	if (running_handles == 0 && finished_cb) {
+		finished_cb(finished_cb_data);
 	}
 }
 
@@ -155,6 +144,9 @@ on_timeout(evutil_socket_t fd, short events, void *userdata)
 	curl_multi_socket_action(this->cm, CURL_SOCKET_TIMEOUT, 0, &running_handles);
 	if (this->check_multi_info) {
 		this->check_multi_info(this);
+	}
+	if (running_handles == 0 && this->finished_cb) {
+		this->finished_cb(this->finished_cb_data);
 	}
 }
 
