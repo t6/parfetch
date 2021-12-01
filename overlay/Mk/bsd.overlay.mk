@@ -19,7 +19,8 @@
 # Sets the global connection limit. Also see
 # CURLMOPT_MAX_TOTAL_CONNECTIONS(3).
 #
-.if !defined(_INCLUDE_PARFETCH_OVERLAY) && !defined(NO_PARFETCH) && \
+.if !defined(BEFOREPORTMK) && !defined(INOPTIONSMK) && \
+	!defined(_INCLUDE_PARFETCH_OVERLAY) && !defined(NO_PARFETCH) && \
 	!make(fetch-list) && !make(fetch-url-list-int) && \
 	!make(fetch-urlall-list) && !make(fetch-url-list)
 _INCLUDE_PARFETCH_OVERLAY=	yes

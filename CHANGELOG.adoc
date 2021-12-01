@@ -33,6 +33,12 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
   framework 7.35 s, parfetch before 4.83 s, parfetch after with
   OpenBSD's libmd 3.24 s, parfetch after with librhash 2.09 s
 
+=== Fixed
+
+* Do not overwrite and break `checksum` and `makesum` if ports
+  have custom `do-fetch` targets
+* Overwrite targets only after `bsd.port.pre.mk`
+
 == [a20211126] - 2021-11-26
 
 No changelog for old releases.
