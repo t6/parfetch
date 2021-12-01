@@ -11,6 +11,7 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
 === Added
 
 * Support `MASTER_SITE_OVERRIDE` and `MASTER_SITE_FREEBSD`
+* Support `RANDOMIZE_MASTER_SITES`
 * Subsume `makesum` as well to make use of on-the-fly
   checksumming too and to skip the sha256(1) calls afterwards.
 * When `PARFETCH_MAKESUM_KEEP_TIMESTAMP` is defined `makesum`

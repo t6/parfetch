@@ -91,6 +91,7 @@ struct ParfetchOptions {
 	bool makesum;
 	bool makesum_ephemeral;
 	bool makesum_keep_timestamp;
+	bool randomize_sites;
 	bool want_colors;
 };
 
@@ -129,6 +130,7 @@ struct InitialDistfileCheckData {
 };
 
 // Prototypes
+DECLARE_COMPARE(random_compare);
 static const char *makevar(const char *);
 static void parfetch_init_options(void);
 static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, enum SitesType, const char *);
@@ -148,6 +150,15 @@ static bool response_code_ok(long, long);
 static struct ParfetchOptions opts;
 // basically how many open files we have at a time
 static const size_t INITIAL_DISTFILE_CHECK_QUEUE_SIZE = 64;
+
+DEFINE_COMPARE(random_compare, const char *, void)
+{
+#if HAVE_ARC4RANDOM
+	return (int)arc4random_uniform(3) - 1;
+#else
+	return (int)(rand() % 3) - 1;
+#endif
+}
 
 const char *
 makevar(const char *var)
@@ -200,6 +211,13 @@ parfetch_init_options()
 	opts.makesum_keep_timestamp = makevar("PARFETCH_MAKESUM_KEEP_TIMESTAMP");
 	opts.disable_size = makevar("DISABLE_SIZE");
 	opts.no_checksum = makevar("NO_CHECKSUM");
+
+	opts.randomize_sites = makevar("RANDOMIZE_SITES");
+#if !HAVE_ARC4RANDOM
+	if (opts.randomize_sites) {
+		srand((unsigned)time(NULL));
+	}
+#endif
 
 	opts.max_host_connections = 1;
 	opts.max_total_connections = 4;
@@ -371,6 +389,9 @@ prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct 
 				const char *master_site_backup = makevar("MASTER_SITE_BACKUP");
 				if (master_site_backup) {
 					ARRAY_JOIN(sites, str_split(pool, str_dup(pool, master_site_backup), " "));
+				}
+				if (opts.randomize_sites) {
+					array_sort(sites, random_compare, NULL);
 				}
 				map_add(groupsites[distfile->sites_type], group, sites);
 			}
