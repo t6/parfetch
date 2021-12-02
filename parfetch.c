@@ -132,7 +132,18 @@ struct InitialDistfileCheckData {
 	EVP_MD_CTX *mdctx;
 };
 
+enum Status {
+	STATUS_DONE,
+	STATUS_EMPTY,
+	STATUS_ERROR,
+	STATUS_FAILED,
+	STATUS_QUEUED,
+	STATUS_UNLINK,
+	STATUS_WROTE,
+};
+
 // Prototypes
+static void status_msg(enum Status, const char *, ...) __printflike(2, 3);
 DECLARE_COMPARE(random_compare);
 static const char *makevar(const char *);
 static void parfetch_init_options(void);
@@ -153,6 +164,55 @@ static bool response_code_ok(long, long);
 static struct ParfetchOptions opts;
 // basically how many open files we have at a time
 static const size_t INITIAL_DISTFILE_CHECK_QUEUE_SIZE = 64;
+
+void
+status_msg(enum Status s, const char *format, ...)
+{
+	const char *status = NULL;
+	const char *color = NULL;
+	switch (s) {
+	case STATUS_DONE:
+		color = opts.color_ok;
+		status = "  done";
+		break;
+	case STATUS_EMPTY:
+		color = "";
+		status = "      ";
+		break;
+	case STATUS_ERROR:
+		color = opts.color_error;
+		status = " error";
+		break;
+	case STATUS_FAILED:
+		color = opts.color_error;
+		status = "failed";
+		break;
+	case STATUS_QUEUED:
+		color = opts.color_info;
+		status = "queued";
+		break;
+	case STATUS_UNLINK:
+		color = opts.color_warning;
+		status = "unlink";
+		break;
+	case STATUS_WROTE:
+		color = opts.color_ok;
+		status = " wrote";
+		break;
+	}
+	panic_unless(status, "status unset");
+	panic_unless(color, "color unset");
+
+	if (opts.want_colors) {
+		fprintf(opts.out, "%s%s%s ", color, status, opts.color_reset);
+	} else {
+		fprintf(opts.out, "%s: ", status);
+	}
+	va_list ap;
+	va_start(ap, format);
+	panic_if(vfprintf(opts.out, format, ap) < 0, "vfprintf");
+	va_end(ap);
+}
 
 DEFINE_COMPARE(random_compare, const char *, void)
 {
@@ -499,9 +559,9 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 						queue_push(files_to_checksum, distfile);
 					}
 				} else {
-					fprintf(opts.out, "%s%-8s%s%s %ssize mismatch (expected: %lld, actual: %lld)%s\n", opts.color_error, "error", opts.color_reset, distfile->name,
+					status_msg(STATUS_ERROR, "%s %ssize mismatch (expected: %lld, actual: %lld)%s\n", distfile->name,
 						opts.color_error, (long long)distfile->distinfo->size, (long long)st.st_size, opts.color_reset);
-					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
+					status_msg(STATUS_UNLINK, "%s\n", distfile->name);
 					unlink(distfile->name);
 					distfile->fetched = false;
 				}
@@ -525,10 +585,9 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 	size_t checksumed_files = 0;
 	ARRAY_FOREACH(finished_files, struct InitialDistfileCheckData *, this) {
 		if (this->error != 0) {
-			fprintf(opts.out, "%s%-8s%s%s could not checksum: %s%s%s\n",
-				opts.color_error, "error", opts.color_reset, this->distfile->name,
+			status_msg(STATUS_ERROR, "%s could not checksum: %s%s%s\n", this->distfile->name,
 				opts.color_error, strerror(this->error), opts.color_reset);
-			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, this->distfile->name);
+			status_msg(STATUS_UNLINK, "%s\n", this->distfile->name);
 			unlink(this->distfile->name);
 			this->distfile->fetched = false;
 		} else if (check_checksum(distinfo, this->distfile, this->mdctx)) {
@@ -537,19 +596,24 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 		} else if (opts.makesum) {
 			panic("check_checksum() returned with failure in makesum mode");
 		} else {
-			fprintf(opts.out, "%s%-8s%s%s %s%s%s\n",
-				opts.color_error, "error", opts.color_reset, this->distfile->name,
+			status_msg(STATUS_ERROR, "%s %s%s%s\n", this->distfile->name,
 				opts.color_error, "checksum mismatch", opts.color_reset);
-			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, this->distfile->name);
+			status_msg(STATUS_UNLINK, "%s\n", this->distfile->name);
 			unlink(this->distfile->name);
 			this->distfile->fetched = false;
 		}
 	}
 	if (array_len(distfiles) > 0) {
 		if (array_len(distfiles) == checksumed_files) {
-			fprintf(opts.out, "%s%-8s%sall %zu files verified\n", opts.color_ok, "verify", opts.color_reset, array_len(distfiles));
+			if (checksumed_files == 1) {
+				status_msg(STATUS_DONE, "%zu file verified\n", array_len(distfiles));
+			} else {
+				status_msg(STATUS_DONE, "all %zu files verified\n", array_len(distfiles));
+			}
+		} else if (checksumed_files > 0) {
+			status_msg(STATUS_FAILED, "only %zu of %zu files verified\n", checksumed_files, array_len(distfiles));
 		} else {
-			fprintf(opts.out, "%s%-8s%sonly %zu of %zu files verified\n", opts.color_error, "verify", opts.color_reset, checksumed_files, array_len(distfiles));
+			status_msg(STATUS_FAILED, "none of the %zu files verified\n", array_len(distfiles));
 		}
 	}
 }
@@ -603,7 +667,7 @@ fetch_distfile(CURLM *cm, struct Queue *distfile_queue)
 			}
 		}
 		curl_multi_add_handle(cm, eh);
-		fprintf(opts.out, "%s%-8s%s%s\n", opts.color_info, "queued", opts.color_reset, queue_entry->url);
+		status_msg(STATUS_QUEUED, "%s\n", queue_entry->url);
 	}
 }
 
@@ -656,7 +720,7 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 	// Reset digest context
 	EVP_DigestInit_ex(queue_entry->mdctx, EVP_sha256(), NULL);
 
-	fprintf(opts.out, "%s%-8s%s%s", opts.color_error, "error", opts.color_reset, queue_entry->url);
+	status_msg(STATUS_ERROR, "%s", queue_entry->url);
 
 	switch (reason) {
 	case FETCH_DISTFILE_NEXT_MIRROR:
@@ -678,13 +742,13 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 		break;
 	}
 	if (msg) {
-		fprintf(opts.out, "%8s%s%s%s\n", "", opts.color_error, msg, opts.color_reset);
+		status_msg(STATUS_EMPTY, "%s%s%s\n", opts.color_error, msg, opts.color_reset);
 	}
 
 	// queue next mirror for file
-	fprintf(opts.out, "%8s%s\n", "", next_mirror_msg);
+	status_msg(STATUS_EMPTY, "%s\n", next_mirror_msg);
 
-	fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, queue_entry->distfile->name);
+	status_msg(STATUS_UNLINK, "%s\n", queue_entry->distfile->name);
 	fetch_distfile(cm, queue_entry->distfile->queue);
 }
 
@@ -745,7 +809,7 @@ check_multi_info(CURLM *cm)
 					}
 					if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->mdctx)) {
 						queue_entry->distfile->fetched = true;
-						fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "done", opts.color_reset, queue_entry->distfile->name);
+						status_msg(STATUS_DONE, "%s\n", queue_entry->distfile->name);
 					} else {
 						fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH, NULL);
 					}
@@ -753,7 +817,7 @@ check_multi_info(CURLM *cm)
 					if (queue_entry->size == queue_entry->distfile->distinfo->size) {
 						if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->mdctx)) {
 							queue_entry->distfile->fetched = true;
-							fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "done", opts.color_reset, queue_entry->distfile->name);
+							status_msg(STATUS_DONE, "%s\n", queue_entry->distfile->name);
 						} else {
 							fetch_distfile_next_mirror(queue_entry, cm, FETCH_DISTFILE_NEXT_CHECKSUM_MISMATCH, NULL);
 						}
@@ -777,7 +841,7 @@ general_curl_error:
 			curl_easy_cleanup(easy_handle);
 			break;
 		} default:
-			fprintf(opts.out, "%s%-8s%s%d\n", opts.color_error, "error", opts.color_reset, message->msg);
+			status_msg(STATUS_ERROR, "%d\n", message->msg);
 			break;
 		}
 	}
@@ -878,7 +942,7 @@ main(int argc, char *argv[])
 			ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
 				distinfo_entry_serialize(distfile->distinfo, f);
 			}
-			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_info, "updated", opts.color_reset, opts.distinfo_file);
+			status_msg(STATUS_WROTE, "%s\n", opts.distinfo_file);
 		}
 		return 0;
 	} else {
