@@ -499,8 +499,8 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 						queue_push(files_to_checksum, distfile);
 					}
 				} else {
-					fprintf(opts.out, "%s%-8s%s%s %ssize mismatch (expected: %zu, actual: %zu)%s\n", opts.color_error, "error", opts.color_reset, distfile->name,
-						opts.color_error, distfile->distinfo->size, st.st_size, opts.color_reset);
+					fprintf(opts.out, "%s%-8s%s%s %ssize mismatch (expected: %lld, actual: %lld)%s\n", opts.color_error, "error", opts.color_reset, distfile->name,
+						opts.color_error, (long long)distfile->distinfo->size, (long long)st.st_size, opts.color_reset);
 					fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, distfile->name);
 					unlink(distfile->name);
 					distfile->fetched = false;
@@ -659,8 +659,8 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 		break;
 	case FETCH_DISTFILE_NEXT_SIZE_MISMATCH:
 		if (queue_entry->distfile->distinfo) {
-			fprintf(opts.out, " %ssize mismatch (expected: %zu, actual: %zu)%s\n",
-				opts.color_error, queue_entry->distfile->distinfo->size, queue_entry->size, opts.color_reset);
+			fprintf(opts.out, " %ssize mismatch (expected: %lld, actual: %lld)%s\n",
+				opts.color_error, (long long)queue_entry->distfile->distinfo->size, (long long)queue_entry->size, opts.color_reset);
 		} else {
 			fputc('\n', opts.out);
 		}
