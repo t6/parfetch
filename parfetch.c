@@ -522,6 +522,7 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 
 	// We finish the checksumming afterwards to avoid pauses.
 	// It might take a while and could block the event loop.
+	size_t checksumed_files = 0;
 	ARRAY_FOREACH(finished_files, struct InitialDistfileCheckData *, this) {
 		if (this->error != 0) {
 			fprintf(opts.out, "%s%-8s%s%s could not checksum: %s%s%s\n",
@@ -531,8 +532,8 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 			unlink(this->distfile->name);
 			this->distfile->fetched = false;
 		} else if (check_checksum(distinfo, this->distfile, this->mdctx)) {
+			checksumed_files++;
 			this->distfile->fetched = true;
-			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, this->distfile->name);
 		} else if (opts.makesum) {
 			panic("check_checksum() returned with failure in makesum mode");
 		} else {
@@ -542,6 +543,13 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, this->distfile->name);
 			unlink(this->distfile->name);
 			this->distfile->fetched = false;
+		}
+	}
+	if (array_len(distfiles) > 0) {
+		if (array_len(distfiles) == checksumed_files) {
+			fprintf(opts.out, "%s%-8s%sall %zu files verified\n", opts.color_ok, "verify", opts.color_reset, array_len(distfiles));
+		} else {
+			fprintf(opts.out, "%s%-8s%sonly %zu of %zu files verified\n", opts.color_error, "verify", opts.color_reset, checksumed_files, array_len(distfiles));
 		}
 	}
 }
