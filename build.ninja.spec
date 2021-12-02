@@ -2,9 +2,9 @@ CSTD = gnu99
 LDADD += $LDADD_EXECINFO
 
 pkg-config
+	libcrypto
 	libcurl
 	libevent
-	librhash
 
 bundle libias.a
 	subdir = $srcdir/libias
@@ -29,18 +29,18 @@ bundle libias.a
 	libias/util.c
 
 bundle libparfetch.a
-	CFLAGS += $CFLAGS_libcurl $CFLAGS_libevent $CFLAGS_librhash
+	CFLAGS += $CFLAGS_libcrypto $CFLAGS_libcurl $CFLAGS_libevent $CFLAGS_librhash
 	loop.c
 	parfetch.c
 	progress.c
 
 bin parfetch
-	LDADD += $LDADD_libcurl $LDADD_libevent $LDADD_librhash
+	LDADD += $LDADD_libcrypto $LDADD_libcurl $LDADD_libevent $LDADD_librhash
 	libias.a
 	libparfetch.a
 
 bin parfetch-static
-	LDADD += -static -Wl,--push-state -Wl,--static $LDADD_static_libcurl $LDADD_static_libevent $LDADD_static_librhash -Wl,--pop-state
+	LDADD += -static -Wl,--push-state -Wl,--static $LDADD_static_libcrypto $LDADD_static_libcurl $LDADD_static_libevent $LDADD_static_librhash -Wl,--pop-state
 	libias.a
 	libparfetch.a
 

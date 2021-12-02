@@ -29,10 +29,10 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
   open them in non-blocking mode and do the checksumming
   asynchronously instead of one by one to reduce idle time.
   This speeds up the whole operation a little. Additionally
-  switch to librhash which is faster than OpenBSD's or FreeBSD's
+  switch to OpenSSL which is faster than OpenBSD's or FreeBSD's
   libmd implementations. Numbers for `makesum` in `x11/wezterm`:
   framework 7.35 s, parfetch before 4.83 s, parfetch after with
-  OpenBSD's libmd 3.24 s, parfetch after with librhash 2.09 s
+  OpenBSD's libmd 3.24 s, parfetch after with OpenSSL 2.02 s
 
 === Fixed
 

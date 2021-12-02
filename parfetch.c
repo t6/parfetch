@@ -28,6 +28,7 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <ctype.h>
 #if HAVE_ERR
 # include <err.h>
 #endif
@@ -42,7 +43,8 @@
 
 #include <curl/curl.h>
 #include <event2/event.h>
-#include <rhash.h>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
 
 #include <libias/array.h>
 #include <libias/color.h>
@@ -113,7 +115,7 @@ struct DistfileQueueEntry {
 	struct Distfile *distfile;
 	const char *filename;
 	const char *url;
-	rhash checksum_ctx;
+	EVP_MD_CTX *mdctx;
 	curl_off_t size;
 	curl_off_t dltotal;
 };
@@ -127,7 +129,7 @@ struct InitialDistfileCheckData {
 	struct Distfile *distfile;
 	int fd;
 	int error;
-	rhash checksum_ctx;
+	EVP_MD_CTX *mdctx;
 };
 
 // Prototypes
@@ -136,7 +138,7 @@ static const char *makevar(const char *);
 static void parfetch_init_options(void);
 static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, enum SitesType, const char *);
 static struct Distinfo *load_distinfo(struct Mempool *);
-static bool check_checksum(struct Distinfo *, struct Distfile *, rhash);
+static bool check_checksum(struct Distinfo *, struct Distfile *, EVP_MD_CTX *);
 static void prepare_distfile_queues(struct Mempool *, struct Distinfo *, struct Progress *, struct Array *);
 static void initial_distfile_check(struct Distinfo *, struct Array *);
 static void initial_distfile_check_queue_file(struct Mempool *, struct event_base *, struct Queue *, struct Array *);
@@ -321,43 +323,42 @@ load_distinfo(struct Mempool *extpool)
 }
 
 bool
-check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, rhash ctx)
+check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, EVP_MD_CTX *ctx)
 {
 	if (opts.no_checksum && !opts.makesum) {
 		return true;
 	} else if (distfile->distinfo) {
-		unless (rhash_final(ctx, NULL) == 0) {
+		uint8_t md_value[EVP_MAX_MD_SIZE];
+		unsigned int md_len;
+		unless (EVP_DigestFinal_ex(ctx, md_value, &md_len)) {
 			if (opts.makesum) {
 				err(1, "could not checksum %s", distfile->name);
 			} else {
 				return false;
 			}
 		}
-		char checksum[130];
-		if (rhash_print(checksum, ctx, RHASH_SHA256, RHPR_HEX) == 0) {
-			if (opts.makesum) {
-				errx(1, "could not checksum %s", distfile->name);
-			} else {
-				return false;
-			}
-		}
+		panic_if(md_len > DISTINFO_MAX_DIGEST_LEN, "md_len > DISTINFO_MAX_DIGEST_LEN");
 		if (opts.makesum) {
-			if (distfile->distinfo->digest) {
-				if (strcmp(distfile->distinfo->digest, checksum) != 0) {
+			if (distfile->distinfo->digest_len > 0) {
+				if (distfile->distinfo->digest_len != md_len ||
+				    memcmp(distfile->distinfo->digest, md_value, md_len) != 0) {
 					unless (opts.makesum_keep_timestamp) {
 						distinfo_set_timestamp(distinfo, time(NULL));
 					}
-					distfile->distinfo->digest = str_dup(distfile->pool, checksum);
+					memcpy(distfile->distinfo->digest, md_value, md_len);
+					distfile->distinfo->digest_len = md_len;
 				}
 			} else {
 				unless (opts.makesum_keep_timestamp) {
 					distinfo_set_timestamp(distinfo, time(NULL));
 				}
-				distfile->distinfo->digest = str_dup(distfile->pool, checksum);
+				memcpy(distfile->distinfo->digest, md_value, md_len);
+				distfile->distinfo->digest_len = md_len;
 			}
 			return true;
 		} else {
-			return strcasecmp(checksum, distfile->distinfo->digest) == 0;
+			return distfile->distinfo->digest_len == md_len &&
+				memcmp(distfile->distinfo->digest, md_value, md_len) == 0;
 		}
 	} else {
 		errx(1, "NO_CHECKSUM not set but distinfo not loaded");
@@ -404,7 +405,8 @@ prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct 
 				e->distfile = distfile;
 				e->filename = str_dup(pool, distfile->name);
 				e->url = str_printf(pool, "%s%s", site, distfile->name);
-				e->checksum_ctx = mempool_add(pool, rhash_init(RHASH_SHA256), rhash_free);
+				e->mdctx = mempool_add(pool, EVP_MD_CTX_new(), EVP_MD_CTX_free);
+				EVP_DigestInit_ex(e->mdctx, EVP_sha256(), NULL);
 				queue_push(distfile->queue, e);
 			}
 		}
@@ -427,7 +429,7 @@ initial_distfile_check_cb(evutil_socket_t fd, short what, void *userdata)
 		}
 		return;
 	} else if (nread != 0) {
-		rhash_update(this->checksum_ctx, buf, nread);
+		EVP_DigestUpdate(this->mdctx, buf, nread);
 	}
 
 	if (nread == 0 || nread != sizeof(buf)) {
@@ -447,7 +449,8 @@ initial_distfile_check_queue_file(struct Mempool *pool, struct event_base *base,
 		return;
 	}
 	struct InitialDistfileCheckData *this = mempool_alloc(pool, sizeof(struct InitialDistfileCheckData));
-	this->checksum_ctx = mempool_add(pool, rhash_init(RHASH_SHA256), rhash_free);
+	this->mdctx = mempool_add(pool, EVP_MD_CTX_new(), EVP_MD_CTX_free);
+	EVP_DigestInit_ex(this->mdctx, EVP_sha256(), NULL);
 	this->pool = pool;
 	this->base = base;
 	this->distfile = distfile;
@@ -527,7 +530,7 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_warning, "unlink", opts.color_reset, this->distfile->name);
 			unlink(this->distfile->name);
 			this->distfile->fetched = false;
-		} else if (check_checksum(distinfo, this->distfile, this->checksum_ctx)) {
+		} else if (check_checksum(distinfo, this->distfile, this->mdctx)) {
 			this->distfile->fetched = true;
 			fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "ok", opts.color_reset, this->distfile->name);
 		} else if (opts.makesum) {
@@ -625,7 +628,7 @@ fetch_distfile_write_cb(char *data, size_t size, size_t nmemb, void *userdata)
 	}
 	queue_entry->size += written;
 	progress_update(queue_entry->progress, written, queue_entry->distfile->name);
-	rhash_update(queue_entry->checksum_ctx, data, written);
+	EVP_DigestUpdate(queue_entry->mdctx, data, written);
 	return written;
 }
 
@@ -642,6 +645,8 @@ fetch_distfile_next_mirror(struct DistfileQueueEntry *queue_entry, CURLM *cm, en
 	queue_entry->distfile->fetched = false;
 	progress_update(queue_entry->progress, -queue_entry->size, NULL);
 	queue_entry->size = 0;
+	// Reset digest context
+	EVP_DigestInit_ex(queue_entry->mdctx, EVP_sha256(), NULL);
 
 	fprintf(opts.out, "%s%-8s%s%s", opts.color_error, "error", opts.color_reset, queue_entry->url);
 
@@ -730,7 +735,7 @@ check_multi_info(CURLM *cm)
 						}
 						queue_entry->distfile->distinfo->size = queue_entry->size;
 					}
-					if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->checksum_ctx)) {
+					if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->mdctx)) {
 						queue_entry->distfile->fetched = true;
 						fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "done", opts.color_reset, queue_entry->distfile->name);
 					} else {
@@ -738,7 +743,7 @@ check_multi_info(CURLM *cm)
 					}
 				} else if (queue_entry->distfile->distinfo) {
 					if (queue_entry->size == queue_entry->distfile->distinfo->size) {
-						if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->checksum_ctx)) {
+						if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->mdctx)) {
 							queue_entry->distfile->fetched = true;
 							fprintf(opts.out, "%s%-8s%s%s\n", opts.color_ok, "done", opts.color_reset, queue_entry->distfile->name);
 						} else {
@@ -776,7 +781,6 @@ main(int argc, char *argv[])
 	SCOPE_MEMPOOL(pool);
 
 	parfetch_init_options();
-	rhash_library_init();
 
 	unless (opts.makesum && opts.makesum_ephemeral) {
 		unless (mkdirp(opts.distdir)) {
