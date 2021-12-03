@@ -98,6 +98,19 @@ $ poudriere bulk -O parfetch devel/tokei
 
 Options can be set in `make.conf`.
 
+==== PARFETCH_MAKESUM_EPHEMERAL
+
+When defined during makesum, distinfo is created/updated but
+no distfiles are saved to disk. Note that the files are still
+downloaded completely to checksum them but DISTDIR is left
+untouched.
+
+==== PARFETCH_MAKESUM_KEEP_TIMESTAMP
+
+When defined during makesum, retain the previous TIMESTAMP in
+distinfo. This can be useful when refreshing patches that have
+no code changes and thus do not warrant a TIMESTAMP bump.
+
 ==== PARFETCH_MAX_HOST_CONNECTIONS
 
 This sets the maximum number of simultaneous open connections to
