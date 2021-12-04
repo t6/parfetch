@@ -335,6 +335,7 @@ parse_distfile_arg(struct Mempool *pool, struct Distinfo *distinfo, enum SitesTy
 			}
 			distinfo_add_entry(distinfo, &(struct DistinfoEntry){
 				.filename = fullname,
+				.size = -1,
 			});
 			distfile->distinfo = distinfo_entry(distinfo, fullname);
 		}
