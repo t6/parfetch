@@ -8,6 +8,11 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
 
 == Unreleased
 
+=== Fixed
+
+* In non-interactive mode (Poudriere) stop adding garbage escape
+  sequences to logs for the progress bar
+
 == [0.1.0] - 2021-12-03
 
 === Added

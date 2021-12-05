@@ -57,7 +57,7 @@ struct Progress {
 	off_t total_bytes;
 	struct winsize winsize;
 	bool initialized;
-	bool progressbar;
+	bool interactive;
 };
 
 // Prototypes
@@ -107,19 +107,19 @@ progress_new(struct event_base *base, FILE *out)
 	this->base = base;
 	this->current_file = str_dup(NULL, "");
 	this->out = out;
-	if (isatty(fileno(this->out))) {
-		this->progressbar = true;
-	}
+	this->interactive = isatty(fileno(this->out));
 	this->timeout = event_new(base, 0, EV_PERSIST, on_timeout, this);
 	struct timeval time;
 	time.tv_sec = 1;
 	time.tv_usec = 0;
 	evtimer_add(this->timeout, &time);
 
-	this->sigint_event = evsignal_new(base, SIGINT, on_sigint, this);
-	evsignal_add(this->sigint_event, NULL);
-	this->sigwinch_event = evsignal_new(base, SIGWINCH, on_sigwinch, this);
-	evsignal_add(this->sigwinch_event, NULL);
+	if (this->interactive) {
+		this->sigint_event = evsignal_new(base, SIGINT, on_sigint, this);
+		evsignal_add(this->sigint_event, NULL);
+		this->sigwinch_event = evsignal_new(base, SIGWINCH, on_sigwinch, this);
+		evsignal_add(this->sigwinch_event, NULL);
+	}
 
 	return this;
 }
@@ -128,11 +128,13 @@ void
 progress_free(struct Progress *this)
 {
 	progress_stop(this);
-	progress_set_winsize(this, this->winsize.ws_row);
+	if (this->interactive) {
+		progress_set_winsize(this, this->winsize.ws_row);
+		event_free(this->sigint_event);
+		event_free(this->sigwinch_event);
+	}
 	free(this->current_file);
 	event_free(this->timeout);
-	event_free(this->sigint_event);
-	event_free(this->sigwinch_event);
 	free(this);
 }
 
@@ -189,14 +191,14 @@ progress_step(struct Progress *this)
 	}
 
 	unless (this->initialized) {
-		if (this->progressbar) {
+		if (this->interactive) {
 			ioctl(fileno(this->out), TIOCGWINSZ, &this->winsize);
 			progress_set_winsize(this, this->winsize.ws_row - 1);
 		}
 		this->initialized = true;
 	}
 
-	if (this->progressbar && this->winsize.ws_col <= (PROGRESS_BAR_WIDTH + strlen("[100%] [] "))) {
+	if (this->interactive && this->winsize.ws_col <= (PROGRESS_BAR_WIDTH + strlen("[100%] [] "))) {
 		if (this->winsize.ws_col >= 4) {
 			fputs(cursor_save, this->out);
 			progress_go_to_bar_row(this);
@@ -222,7 +224,7 @@ progress_step(struct Progress *this)
 	if (filename_width > 0) {
 		filename = str_slice(pool, this->current_file, 0, filename_width);
 	}
-	if (this->progressbar) {
+	if (this->interactive) {
 		fputs(cursor_save, this->out);
 		progress_go_to_bar_row(this);
 		fputs(erase_line_all, this->out);
@@ -239,6 +241,8 @@ void
 progress_stop(struct Progress *this)
 {
 	event_del(this->timeout);
-	event_del(this->sigint_event);
-	event_del(this->sigwinch_event);
+	if (this->interactive) {
+		event_del(this->sigint_event);
+		event_del(this->sigwinch_event);
+	}
 }
