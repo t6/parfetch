@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <libgen.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,7 @@
 #include <libias/flow.h>
 #include <libias/io.h>
 #include <libias/map.h>
+#include <libias/mem.h>
 #include <libias/mempool.h>
 #include <libias/mempool/file.h>
 #include <libias/queue.h>
@@ -87,6 +89,7 @@ struct ParfetchOptions {
 	const char *distinfo_file;
 	const char *target;
 
+	size_t initial_distfile_check_threads;
 	long max_host_connections;
 	long max_total_connections;
 	bool disable_size;
@@ -124,12 +127,27 @@ struct InitialDistfileCheckData {
 	struct Mempool *pool;
 	struct event_base *base;
 	struct event *event;
-	struct Queue *files_to_checksum;
+	FILE *out;
 	struct Array *finished_files;
+	struct Queue *files_to_checksum;
+	size_t *verified_files;
+	struct Distinfo *distinfo;
+	pthread_mutex_t *distinfo_mtx;
 	struct Distfile *distfile;
 	int fd;
 	int error;
 	EVP_MD_CTX *mdctx;
+};
+
+struct InitialDistfileCheckWorkerData {
+	size_t queue_size;
+	struct Distinfo *distinfo;
+	pthread_mutex_t *distinfo_mtx;
+	struct Queue *files_to_checksum;
+	size_t verified_files;
+	FILE *out;
+	char *out_buf;
+	size_t out_len;
 };
 
 enum Status {
@@ -144,16 +162,20 @@ enum Status {
 
 // Prototypes
 static void status_msg(enum Status, const char *, ...) __printflike(2, 3);
+static void status_msgf(FILE *, enum Status, const char *, ...) __printflike(3, 4);
+static void status_msgv(FILE *, enum Status, const char *, va_list);
 DECLARE_COMPARE(random_compare);
 static const char *makevar(const char *);
 static void parfetch_init_options(void);
 static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, enum SitesType, const char *);
 static struct Distinfo *load_distinfo(struct Mempool *);
-static bool check_checksum(struct Distinfo *, struct Distfile *, EVP_MD_CTX *);
+static bool check_checksum(struct Distinfo *, pthread_mutex_t *, struct Distfile *, EVP_MD_CTX *);
 static void prepare_distfile_queues(struct Mempool *, struct Distinfo *, struct Progress *, struct Array *);
 static void initial_distfile_check(struct Distinfo *, struct Array *);
-static void initial_distfile_check_queue_file(struct Mempool *, struct event_base *, struct Queue *, struct Array *);
+static void initial_distfile_check_queue_file(struct Mempool *, struct Distinfo *, pthread_mutex_t *, struct event_base *, FILE *, struct Array *, struct Queue *, size_t *);
 static void initial_distfile_check_cb(evutil_socket_t, short, void *);
+static void initial_distfile_check_final(struct InitialDistfileCheckData *);
+static void *initial_distfile_check_worker(void *);
 static void fetch_distfile(CURLM *, struct Queue *);
 static void fetch_distfile_next_mirror(struct DistfileQueueEntry *, CURLM *, enum FetchDistfileNextReason, const char *);
 static size_t fetch_distfile_progress_cb(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
@@ -167,6 +189,24 @@ static const size_t INITIAL_DISTFILE_CHECK_QUEUE_SIZE = 64;
 
 void
 status_msg(enum Status s, const char *format, ...)
+{
+	va_list ap;
+	va_start(ap, format);
+	status_msgv(opts.out, s, format, ap);
+	va_end(ap);
+}
+
+void
+status_msgf(FILE *out, enum Status s, const char *format, ...)
+{
+	va_list ap;
+	va_start(ap, format);
+	status_msgv(out, s, format, ap);
+	va_end(ap);
+}
+
+void
+status_msgv(FILE *out, enum Status s, const char *format, va_list ap)
 {
 	const char *status = NULL;
 	const char *color = NULL;
@@ -204,14 +244,11 @@ status_msg(enum Status s, const char *format, ...)
 	panic_unless(color, "color unset");
 
 	if (opts.want_colors) {
-		fprintf(opts.out, "%s%s%s ", color, status, opts.color_reset);
+		fprintf(out, "%s%s%s ", color, status, opts.color_reset);
 	} else {
-		fprintf(opts.out, "%s: ", status);
+		fprintf(out, "%s: ", status);
 	}
-	va_list ap;
-	va_start(ap, format);
-	panic_if(vfprintf(opts.out, format, ap) < 0, "vfprintf");
-	va_end(ap);
+	panic_if(vfprintf(out, format, ap) < 0, "vfprintf");
 }
 
 DEFINE_COMPARE(random_compare, const char *, void)
@@ -282,6 +319,11 @@ parfetch_init_options()
 	}
 #endif
 
+	ssize_t n_threads = sysconf(_SC_NPROCESSORS_ONLN);
+	if (n_threads < 0) {
+		err(1, "sysconf(_SC_NPROCESSORS_ONLN)");
+	}
+	opts.initial_distfile_check_threads = n_threads + 1;
 	opts.max_host_connections = 1;
 	opts.max_total_connections = 4;
 	const char *max_host_connections_env = makevar("PARFETCH_MAX_HOST_CONNECTIONS");
@@ -384,7 +426,7 @@ load_distinfo(struct Mempool *extpool)
 }
 
 bool
-check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, EVP_MD_CTX *ctx)
+check_checksum(struct Distinfo *distinfo, pthread_mutex_t *distinfo_mtx, struct Distfile *distfile, EVP_MD_CTX *ctx)
 {
 	if (opts.no_checksum && !opts.makesum) {
 		return true;
@@ -404,14 +446,26 @@ check_checksum(struct Distinfo *distinfo, struct Distfile *distfile, EVP_MD_CTX 
 				if (distfile->distinfo->digest_len != md_len ||
 				    memcmp(distfile->distinfo->digest, md_value, md_len) != 0) {
 					unless (opts.makesum_keep_timestamp) {
+						if (distinfo_mtx) {
+							pthread_mutex_lock(distinfo_mtx);
+						}
 						distinfo_set_timestamp(distinfo, time(NULL));
+						if (distinfo_mtx) {
+							pthread_mutex_unlock(distinfo_mtx);
+						}
 					}
 					memcpy(distfile->distinfo->digest, md_value, md_len);
 					distfile->distinfo->digest_len = md_len;
 				}
 			} else {
 				unless (opts.makesum_keep_timestamp) {
+					if (distinfo_mtx) {
+						pthread_mutex_lock(distinfo_mtx);
+					}
 					distinfo_set_timestamp(distinfo, time(NULL));
+					if (distinfo_mtx) {
+						pthread_mutex_unlock(distinfo_mtx);
+					}
 				}
 				memcpy(distfile->distinfo->digest, md_value, md_len);
 				distfile->distinfo->digest_len = md_len;
@@ -498,12 +552,35 @@ initial_distfile_check_cb(evutil_socket_t fd, short what, void *userdata)
 		close(this->fd);
 		this->fd = -1;
 		array_append(this->finished_files, this);
-		initial_distfile_check_queue_file(this->pool, this->base, this->files_to_checksum, this->finished_files);
+		initial_distfile_check_queue_file(this->pool, this->distinfo, this->distinfo_mtx, this->base, this->out, this->finished_files, this->files_to_checksum, this->verified_files);
 	}
 }
 
 void
-initial_distfile_check_queue_file(struct Mempool *pool, struct event_base *base, struct Queue *files_to_checksum, struct Array *finished_files)
+initial_distfile_check_final(struct InitialDistfileCheckData *this)
+{
+	if (this->error != 0) {
+		status_msgf(this->out, STATUS_ERROR, "%s could not checksum: %s%s%s\n", this->distfile->name,
+			opts.color_error, strerror(this->error), opts.color_reset);
+		status_msgf(this->out, STATUS_UNLINK, "%s\n", this->distfile->name);
+		unlink(this->distfile->name);
+		this->distfile->fetched = false;
+	} else if (check_checksum(this->distinfo, this->distinfo_mtx, this->distfile, this->mdctx)) {
+		*this->verified_files += 1;
+		this->distfile->fetched = true;
+	} else if (opts.makesum) {
+		panic("check_checksum() returned with failure in makesum mode");
+	} else {
+		status_msgf(this->out, STATUS_ERROR, "%s %s%s%s\n", this->distfile->name,
+			opts.color_error, "checksum mismatch", opts.color_reset);
+		status_msgf(this->out, STATUS_UNLINK, "%s\n", this->distfile->name);
+		unlink(this->distfile->name);
+		this->distfile->fetched = false;
+	}
+}
+
+void
+initial_distfile_check_queue_file(struct Mempool *pool, struct Distinfo *distinfo, pthread_mutex_t *distinfo_mtx, struct event_base *base, FILE *out, struct Array *finished_files, struct Queue *files_to_checksum, size_t *verified_files)
 {
 	struct Distfile *distfile = queue_pop(files_to_checksum);
 	unless (distfile) {
@@ -514,17 +591,41 @@ initial_distfile_check_queue_file(struct Mempool *pool, struct event_base *base,
 	EVP_DigestInit_ex(this->mdctx, EVP_sha256(), NULL);
 	this->pool = pool;
 	this->base = base;
+	this->distinfo = distinfo;
+	this->distinfo_mtx = distinfo_mtx;
 	this->distfile = distfile;
-	this->files_to_checksum = files_to_checksum;
 	this->finished_files = finished_files;
+	this->files_to_checksum = files_to_checksum;
+	this->verified_files = verified_files;
+	this->out = out;
 	this->fd = open(this->distfile->name, O_RDONLY | O_NONBLOCK);
 	if (this->fd == -1) {
 		this->error = errno;
-		array_append(finished_files, this);
+		array_append(this->finished_files, this);
 	} else {
 		this->event = event_new(base, this->fd, EV_READ | EV_PERSIST, initial_distfile_check_cb, this);
 		event_add(this->event, NULL);
 	}
+}
+
+void *
+initial_distfile_check_worker(void *userdata)
+{
+	SCOPE_MEMPOOL(pool);
+	struct InitialDistfileCheckWorkerData *this = userdata;
+
+	struct Array *finished_files = mempool_array(pool);
+	struct event_base *base = mempool_add(pool, event_base_new(), event_base_free);
+	for (size_t i = 0; i < this->queue_size && queue_len(this->files_to_checksum); i++) {
+		initial_distfile_check_queue_file(pool, this->distinfo, this->distinfo_mtx, base, this->out, finished_files, this->files_to_checksum, &this->verified_files);
+	}
+	event_base_dispatch(base);
+
+	ARRAY_FOREACH(finished_files, struct InitialDistfileCheckData *, this) {
+		initial_distfile_check_final(this);
+	}
+
+	return this;
 }
 
 void
@@ -574,45 +675,56 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 		}
 	}
 
-	struct event_base *base = mempool_add(pool, event_base_new(), event_base_free);
-	struct Array *finished_files = mempool_array(pool);
-	for (size_t i = 0; i < INITIAL_DISTFILE_CHECK_QUEUE_SIZE && queue_len(files_to_checksum) != 0; i++) {
-		initial_distfile_check_queue_file(pool, base, files_to_checksum, finished_files);
+	size_t n_threads = opts.initial_distfile_check_threads;
+	pthread_t *tid = mempool_take(pool, xrecallocarray(NULL, 0, n_threads, sizeof(pthread_t)));
+	struct InitialDistfileCheckWorkerData *data = mempool_take(pool, xrecallocarray(NULL, 0, n_threads, sizeof(struct InitialDistfileCheckWorkerData)));
+	pthread_mutex_t distinfo_mtx;
+	if (pthread_mutex_init(&distinfo_mtx, NULL) != 0) {
+		err(1, "pthread_mutex_init");
 	}
-	event_base_dispatch(base);
-
-	// We finish the checksumming afterwards to avoid pauses.
-	// It might take a while and could block the event loop.
-	size_t checksumed_files = 0;
-	ARRAY_FOREACH(finished_files, struct InitialDistfileCheckData *, this) {
-		if (this->error != 0) {
-			status_msg(STATUS_ERROR, "%s could not checksum: %s%s%s\n", this->distfile->name,
-				opts.color_error, strerror(this->error), opts.color_reset);
-			status_msg(STATUS_UNLINK, "%s\n", this->distfile->name);
-			unlink(this->distfile->name);
-			this->distfile->fetched = false;
-		} else if (check_checksum(distinfo, this->distfile, this->mdctx)) {
-			checksumed_files++;
-			this->distfile->fetched = true;
-		} else if (opts.makesum) {
-			panic("check_checksum() returned with failure in makesum mode");
-		} else {
-			status_msg(STATUS_ERROR, "%s %s%s%s\n", this->distfile->name,
-				opts.color_error, "checksum mismatch", opts.color_reset);
-			status_msg(STATUS_UNLINK, "%s\n", this->distfile->name);
-			unlink(this->distfile->name);
-			this->distfile->fetched = false;
+	for (size_t i = 0; i < n_threads; i++) {
+		data[i].queue_size = INITIAL_DISTFILE_CHECK_QUEUE_SIZE / n_threads;
+		data[i].distinfo = distinfo;
+		data[i].distinfo_mtx = &distinfo_mtx;
+		data[i].files_to_checksum = mempool_queue(pool);
+		data[i].out = open_memstream(&data[i].out_buf, &data[i].out_len);
+		unless (data[i].out) {
+			err(1, "open_memstream");
 		}
 	}
+	while (queue_len(files_to_checksum) > 0) {
+		for (size_t i = 0; i < n_threads && queue_len(files_to_checksum) > 0; i++) {
+			queue_push(data[i].files_to_checksum, queue_pop(files_to_checksum));
+		}
+	}
+	for (size_t i = 0; i < n_threads; i++) {
+		if (pthread_create(&tid[i], NULL, initial_distfile_check_worker, &data[i]) != 0) {
+			err(1, "pthread_create");
+		}
+	}
+	size_t verified_files = 0;
+	for (size_t i = 0; i < n_threads; i++) {
+		void *result = NULL;
+		if (pthread_join(tid[i], &result) != 0) {
+			err(1, "pthread_join");
+		}
+		struct InitialDistfileCheckWorkerData *this = result;
+		fclose(this->out);
+		fputs(this->out_buf, opts.out);
+		free(this->out_buf);
+		verified_files += this->verified_files;
+	}
+	panic_unless(queue_len(files_to_checksum) == 0, "unprocessed files?");
+
 	if (array_len(distfiles) > 0) {
-		if (array_len(distfiles) == checksumed_files) {
-			if (checksumed_files == 1) {
+		if (array_len(distfiles) == verified_files) {
+			if (verified_files == 1) {
 				status_msg(STATUS_DONE, "%zu file verified\n", array_len(distfiles));
 			} else {
 				status_msg(STATUS_DONE, "all %zu files verified\n", array_len(distfiles));
 			}
-		} else if (checksumed_files > 0) {
-			status_msg(STATUS_FAILED, "only %zu of %zu files verified\n", checksumed_files, array_len(distfiles));
+		} else if (verified_files > 0) {
+			status_msg(STATUS_FAILED, "only %zu of %zu files verified\n", verified_files, array_len(distfiles));
 		} else {
 			status_msg(STATUS_FAILED, "none of the %zu files verified\n", array_len(distfiles));
 		}
@@ -808,7 +920,7 @@ check_multi_info(CURLM *cm)
 						}
 						queue_entry->distfile->distinfo->size = queue_entry->size;
 					}
-					if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->mdctx)) {
+					if (check_checksum(queue_entry->distinfo, NULL, queue_entry->distfile, queue_entry->mdctx)) {
 						queue_entry->distfile->fetched = true;
 						status_msg(STATUS_DONE, "%s\n", queue_entry->distfile->name);
 					} else {
@@ -816,7 +928,7 @@ check_multi_info(CURLM *cm)
 					}
 				} else if (queue_entry->distfile->distinfo) {
 					if (queue_entry->size == queue_entry->distfile->distinfo->size) {
-						if (check_checksum(queue_entry->distinfo, queue_entry->distfile, queue_entry->mdctx)) {
+						if (check_checksum(queue_entry->distinfo, NULL, queue_entry->distfile, queue_entry->mdctx)) {
 							queue_entry->distfile->fetched = true;
 							status_msg(STATUS_DONE, "%s\n", queue_entry->distfile->name);
 						} else {

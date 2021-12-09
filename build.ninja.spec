@@ -1,4 +1,5 @@
 CSTD = gnu99
+LDFLAGS += -pthread
 LDADD += $LDADD_EXECINFO
 
 pkg-config
