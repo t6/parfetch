@@ -8,10 +8,17 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
 
 == Unreleased
 
+=== Changed
+
+* Use a couple of worker threads for the initial checksum to
+  shave off a couple of extra ms (`lang/rust` `makesum` with 31
+  distfiles: before 5.8s, after 3.2s)
+
 === Fixed
 
 * In non-interactive mode (Poudriere) stop adding garbage escape
   sequences to logs for the progress bar
+* Fix infinite loop on initial checksum with 0 byte files
 
 == [0.1.0] - 2021-12-03
 
