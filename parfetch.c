@@ -604,7 +604,8 @@ initial_distfile_check_queue_file(struct Mempool *pool, struct Distinfo *distinf
 		array_append(this->finished_files, this);
 	} else {
 		this->event = event_new(base, this->fd, EV_READ | EV_PERSIST, initial_distfile_check_cb, this);
-		event_add(this->event, NULL);
+		struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+		event_add(this->event, &tv);
 	}
 }
 
