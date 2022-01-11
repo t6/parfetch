@@ -16,6 +16,9 @@ bundle libias.a
 	libias/flow.c
 	libias/io.c
 	libias/io/mkdirp.c
+	libias/libgrapheme/character.c
+	libias/libgrapheme/utf8.c
+	libias/libgrapheme/util.c
 	libias/map.c
 	libias/mem.c
 	libias/mempool.c
@@ -26,7 +29,6 @@ bundle libias.a
 	libias/set.c
 	libias/stack.c
 	libias/str.c
-	libias/utf8.c
 	libias/util.c
 
 bundle libparfetch.a
