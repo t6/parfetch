@@ -59,6 +59,7 @@
 #include <libias/queue.h>
 #include <libias/set.h>
 #include <libias/str.h>
+#include <libias/trait/compare.h>
 
 #include "loop.h"
 #include "progress.h"
@@ -164,7 +165,7 @@ enum Status {
 static void status_msg(enum Status, const char *, ...) __printflike(2, 3);
 static void status_msgf(FILE *, enum Status, const char *, ...) __printflike(3, 4);
 static void status_msgv(FILE *, enum Status, const char *, va_list);
-DECLARE_COMPARE(random_compare);
+static DECLARE_COMPARE(random_compare);
 static const char *makevar(const char *);
 static void parfetch_init_options(void);
 static struct Distfile *parse_distfile_arg(struct Mempool *, struct Distinfo *, enum SitesType, const char *);
@@ -485,8 +486,8 @@ prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct 
 {
 	// collect MASTER_SITES / PATCH_SITES per group and create mirror queues
 	struct Map *groupsites[2];
-	groupsites[MASTER_SITES] = mempool_map(pool, str_compare, NULL);
-	groupsites[PATCH_SITES] = mempool_map(pool, str_compare, NULL);
+	groupsites[MASTER_SITES] = mempool_map(pool, str_compare);
+	groupsites[PATCH_SITES] = mempool_map(pool, str_compare);
 	ARRAY_FOREACH(distfiles, struct Distfile *, distfile) {
 		const char *env_prefix[] = { "_MASTER_SITES_" , "_PATCH_SITES_" };
 		ARRAY_FOREACH(distfile->groups, const char *, group) {
@@ -508,7 +509,7 @@ prepare_distfile_queues(struct Mempool *pool, struct Distinfo *distinfo, struct 
 					ARRAY_JOIN(sites, str_split(pool, str_dup(pool, master_site_backup), " "));
 				}
 				if (opts.randomize_sites) {
-					array_sort(sites, random_compare, NULL);
+					array_sort(sites, &(struct CompareTrait){random_compare, NULL});
 				}
 				map_add(groupsites[distfile->sites_type], group, sites);
 			}

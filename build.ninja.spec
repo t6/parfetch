@@ -1,4 +1,4 @@
-CSTD = gnu99
+CSTD = gnu11
 LDFLAGS += -pthread
 LDADD += $LDADD_EXECINFO
 

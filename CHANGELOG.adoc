@@ -10,6 +10,7 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
 
 === Changed
 
+* Parfetch requires C11 now
 * Use a couple of worker threads for the initial checksum to
   shave off a couple of extra ms (`lang/rust` `makesum` with 31
   distfiles: before 5.8s, after 3.2s)
