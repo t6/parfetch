@@ -8,6 +8,8 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
 
 == Unreleased
 
+== [0.1.1] - 2022-01-29
+
 === Changed
 
 * Parfetch requires C11 now
