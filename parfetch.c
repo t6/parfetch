@@ -35,7 +35,6 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <libgen.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,6 +59,7 @@
 #include <libias/set.h>
 #include <libias/str.h>
 #include <libias/trait/compare.h>
+#include <libias/workqueue.h>
 
 #include "loop.h"
 #include "progress.h"
@@ -176,7 +176,7 @@ static void initial_distfile_check(struct Distinfo *, struct Array *);
 static void initial_distfile_check_queue_file(struct Mempool *, struct Distinfo *, pthread_mutex_t *, struct event_base *, FILE *, struct Array *, struct Queue *, size_t *);
 static void initial_distfile_check_cb(evutil_socket_t, short, void *);
 static void initial_distfile_check_final(struct InitialDistfileCheckData *);
-static void *initial_distfile_check_worker(void *);
+static void initial_distfile_check_worker(int, void *);
 static void fetch_distfile(CURLM *, struct Queue *);
 static void fetch_distfile_next_mirror(struct DistfileQueueEntry *, CURLM *, enum FetchDistfileNextReason, const char *);
 static size_t fetch_distfile_progress_cb(void *, curl_off_t, curl_off_t, curl_off_t, curl_off_t);
@@ -359,7 +359,8 @@ parse_distfile_arg(struct Mempool *pool, struct Distinfo *distinfo, enum SitesTy
 		*groups = 0;
 		distfile->groups = str_split(pool, groups + 1, ",");
 	} else {
-		distfile->groups = MEMPOOL_ARRAY(pool, "DEFAULT");
+		distfile->groups = mempool_array(pool);
+		array_append(distfile->groups, "DEFAULT");
 	}
 
 	{
@@ -610,8 +611,8 @@ initial_distfile_check_queue_file(struct Mempool *pool, struct Distinfo *distinf
 	}
 }
 
-void *
-initial_distfile_check_worker(void *userdata)
+void
+initial_distfile_check_worker(int tid, void *userdata)
 {
 	SCOPE_MEMPOOL(pool);
 	struct InitialDistfileCheckWorkerData *this = userdata;
@@ -626,8 +627,6 @@ initial_distfile_check_worker(void *userdata)
 	ARRAY_FOREACH(finished_files, struct InitialDistfileCheckData *, this) {
 		initial_distfile_check_final(this);
 	}
-
-	return this;
 }
 
 void
@@ -677,13 +676,10 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 		}
 	}
 
-	size_t n_threads = opts.initial_distfile_check_threads;
-	pthread_t *tid = mempool_take(pool, xrecallocarray(NULL, 0, n_threads, sizeof(pthread_t)));
+	struct Workqueue *wqueue = mempool_workqueue(pool, opts.initial_distfile_check_threads);
+	size_t n_threads = workqueue_threads(wqueue);
 	struct InitialDistfileCheckWorkerData *data = mempool_take(pool, xrecallocarray(NULL, 0, n_threads, sizeof(struct InitialDistfileCheckWorkerData)));
-	pthread_mutex_t distinfo_mtx;
-	if (pthread_mutex_init(&distinfo_mtx, NULL) != 0) {
-		err(1, "pthread_mutex_init");
-	}
+	pthread_mutex_t distinfo_mtx = PTHREAD_MUTEX_INITIALIZER;
 	for (size_t i = 0; i < n_threads; i++) {
 		data[i].queue_size = INITIAL_DISTFILE_CHECK_QUEUE_SIZE / n_threads;
 		data[i].distinfo = distinfo;
@@ -700,17 +696,13 @@ initial_distfile_check(struct Distinfo *distinfo, struct Array *distfiles)
 		}
 	}
 	for (size_t i = 0; i < n_threads; i++) {
-		if (pthread_create(&tid[i], NULL, initial_distfile_check_worker, &data[i]) != 0) {
-			err(1, "pthread_create");
-		}
+		workqueue_push(wqueue, initial_distfile_check_worker, &data[i]);
 	}
+	workqueue_wait(wqueue);
+
 	size_t verified_files = 0;
 	for (size_t i = 0; i < n_threads; i++) {
-		void *result = NULL;
-		if (pthread_join(tid[i], &result) != 0) {
-			err(1, "pthread_join");
-		}
-		struct InitialDistfileCheckWorkerData *this = result;
+		struct InitialDistfileCheckWorkerData *this = &data[i];
 		fclose(this->out);
 		fputs(this->out_buf, opts.out);
 		free(this->out_buf);

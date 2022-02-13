@@ -30,6 +30,7 @@ bundle libias.a
 	libias/stack.c
 	libias/str.c
 	libias/util.c
+	libias/workqueue.c
 
 bundle libparfetch.a
 	CFLAGS += $CFLAGS_libcrypto $CFLAGS_libcurl $CFLAGS_libevent
