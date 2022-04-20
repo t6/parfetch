@@ -1,11 +1,11 @@
 freebsd_task:
   freebsd_instance:
-    image_family: freebsd-12-2
+    image_family: freebsd-12-3
   env:
     CIRRUS_CLONE_SUBMODULES: true
   deps_script:
     - sed -i.bak -e 's,/quarterly,/latest,' /etc/pkg/FreeBSD.conf
-    - pkg install -y samurai pkgconf curl libevent
+    - pkg install -y samurai pkgconf libevent
   matrix:
     - name: freebsd_clang
       test_script:
@@ -23,7 +23,7 @@ linux_task:
   env:
     CIRRUS_CLONE_SUBMODULES: true
   deps_script:
-    - apt-get update && apt-get -y install bash ninja-build libssl-dev libcurl4-openssl-dev pkg-config libevent-dev
+    - apt-get update && apt-get -y install bash ninja-build libssl-dev pkg-config libevent-dev
   matrix:
     - name: linux_clang
       clang_script:
@@ -35,21 +35,3 @@ linux_task:
       test_script:
         - ./configure CC=gcc || cat _build/.mkbuild/config.log
         - ninja -C_build parfetch
-
-macos_task:
-  osx_instance:
-    image: monterey-base
-  env:
-    CIRRUS_CLONE_SUBMODULES: true
-    PKG_CONFIG_PATH: /usr/local/opt/curl/lib/pkgconfig:/usr/local/opt/libevent/lib/pkgconfig:/usr/local/opt/openssl@1.1/lib/pkgconfig
-  deps_script:
-    - brew install samurai pkg-config curl libevent
-  matrix:
-    - name: macos_clang
-      test_script:
-        - ./configure CC=clang || cat _build/.mkbuild/config.log
-        - samu -C_build parfetch
-    - name: macos_gcc
-      test_script:
-        - ./configure CC=gcc || cat _build/.mkbuild/config.log
-        - samu -C_build parfetch
