@@ -8,6 +8,8 @@ The format is based on https://keepachangelog.com/en/1.0.0/[Keep a ChangeLog].
 
 == Unreleased
 
+== [0.1.2] - 2022-04-20
+
 === Changed
 
 * Vendor curl and nghttp2 due to the unreliable static linking support in FreeBSD Ports
